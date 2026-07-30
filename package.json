@@ -10,7 +10,10 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "db:seed": "prisma db seed"
+    "db:seed": "prisma db seed",
+    "postinstall": "prisma generate",
+    "prisma:push": "prisma db push",
+    "db:push-seed": "prisma db push && prisma db seed"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",
