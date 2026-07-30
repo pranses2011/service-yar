@@ -87,7 +87,7 @@ export default async function TechnicianDetailsPage({
             <Link href="/dashboard/customers">مشتریان</Link>
             <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
             <Link href="/dashboard/technicians">تکنسین‌ها</Link>
-            <a href="#">فاکتورها</a>
+            <Link href="/dashboard/invoices">فاکتورها</Link>
           </nav>
         </div>
       </aside>

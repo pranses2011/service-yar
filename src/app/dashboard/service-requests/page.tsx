@@ -115,7 +115,7 @@ export default async function ServiceRequestsPage({
             <Link href="/dashboard/customers">مشتریان</Link>
             <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
             <Link href="/dashboard/technicians">تکنسین‌ها</Link>
-            <a href="#">فاکتورها</a>
+            <Link href="/dashboard/invoices">فاکتورها</Link>
             <Link href="/auth/activate">اشتراک و لایسنس</Link>
           </nav>
         </div>

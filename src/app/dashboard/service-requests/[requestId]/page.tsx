@@ -114,7 +114,7 @@ export default async function ServiceRequestDetailsPage({
             <Link href="/dashboard/customers">مشتریان</Link>
             <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
             <Link href="/dashboard/technicians">تکنسین‌ها</Link>
-            <a href="#">فاکتورها</a>
+            <Link href="/dashboard/invoices">فاکتورها</Link>
           </nav>
         </div>
       </aside>
@@ -334,7 +334,10 @@ export default async function ServiceRequestDetailsPage({
             {request.invoice ? (
               <div className="info-list">
                 <p>
-                  <strong>شماره فاکتور:</strong> {request.invoice.invoiceNumber}
+                  <strong>شماره فاکتور:</strong>{" "}
+                  <Link href={`/dashboard/invoices/${request.invoice.id}`}>
+                    {request.invoice.invoiceNumber}
+                  </Link>
                 </p>
                 <p>
                   <strong>مبلغ کل:</strong>{" "}
@@ -345,9 +348,17 @@ export default async function ServiceRequestDetailsPage({
                 </p>
               </div>
             ) : (
-              <p className="muted">
-                هنوز فاکتوری برای این درخواست صادر نشده است. ماژول فاکتور در مرحله بعدی تکمیل می‌شود.
-              </p>
+              <div>
+                <p className="muted">
+                  هنوز فاکتوری برای این درخواست صادر نشده است.
+                </p>
+                <Link
+                  className="button"
+                  href={`/dashboard/service-requests/${request.id}/invoice`}
+                >
+                  صدور فاکتور
+                </Link>
+              </div>
             )}
           </div>
         </section>
