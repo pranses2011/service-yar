@@ -1,0 +1,68 @@
+name: Database Push and Seed
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_seed:
+        description: "Run initial seed data?"
+        required: true
+        default: "yes"
+        type: choice
+        options:
+          - "yes"
+          - "no"
+
+jobs:
+  db:
+    runs-on: ubuntu-latest
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SEED_ADMIN_NAME: ${{ secrets.SEED_ADMIN_NAME }}
+      SEED_ADMIN_MOBILE: ${{ secrets.SEED_ADMIN_MOBILE }}
+      SEED_ADMIN_EMAIL: ${{ secrets.SEED_ADMIN_EMAIL }}
+      SEED_ADMIN_PASSWORD: ${{ secrets.SEED_ADMIN_PASSWORD }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -e
+
+          if [ -z "$DATABASE_URL" ]; then
+            echo "DATABASE_URL secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$SEED_ADMIN_MOBILE" ]; then
+            echo "SEED_ADMIN_MOBILE secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$SEED_ADMIN_PASSWORD" ]; then
+            echo "SEED_ADMIN_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          echo "Required secrets are available."
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Push Prisma schema to database
+        run: npx prisma db push
+
+      - name: Seed database
+        if: ${{ github.event.inputs.run_seed == 'yes' }}
+        run: npm run db:seed
