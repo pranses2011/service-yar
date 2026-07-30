@@ -14,13 +14,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Generate deployment tools safely
+      - name: Generate deployment files
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           mkdir -p src/app/api/health
-          mkdir -p .github/workflows
           mkdir -p docs
 
           cat > vercel.json <<'EOF'
@@ -44,135 +43,42 @@ jobs:
           }
           EOF
 
-          cat > .github/workflows/ci.yml <<'EOF'
-          name: CI Build Check
-
-          on:
-            workflow_dispatch:
-            push:
-              branches:
-                - main
-
-          jobs:
-            build:
-              runs-on: ubuntu-latest
-
-              env:
-                DATABASE_URL: "postgresql://postgres:password@localhost:5432/servicyar?schema=public"
-                SEED_ADMIN_NAME: "مدیر کل سرویسیار"
-                SEED_ADMIN_MOBILE: "09120000000"
-                SEED_ADMIN_EMAIL: "admin@servicyar.local"
-                SEED_ADMIN_PASSWORD: "Admin@123456"
-
-              steps:
-                - name: Checkout repository
-                  uses: actions/checkout@v4
-
-                - name: Setup Node.js
-                  uses: actions/setup-node@v4
-                  with:
-                    node-version: 22
-
-                - name: Install dependencies
-                  run: npm install
-
-                - name: Generate Prisma Client
-                  run: npx prisma generate
-
-                - name: Build project
-                  run: npm run build
-          EOF
-
-          # برای جلوگیری از تفسیر زودهنگام GitHub Actions expressions
-          # عبارت ${{ ... }} را با متغیر می‌سازیم.
-          GHA='$'
-
-          cat > .github/workflows/db-push-seed.yml <<EOF
-          name: Database Push and Seed
-
-          on:
-            workflow_dispatch:
-              inputs:
-                run_seed:
-                  description: "آیا Seed اولیه اجرا شود؟"
-                  required: true
-                  default: "yes"
-                  type: choice
-                  options:
-                    - "yes"
-                    - "no"
-
-          jobs:
-            db:
-              runs-on: ubuntu-latest
-
-              env:
-                DATABASE_URL: ${GHA}{{ secrets.DATABASE_URL }}
-                SEED_ADMIN_NAME: ${GHA}{{ secrets.SEED_ADMIN_NAME }}
-                SEED_ADMIN_MOBILE: ${GHA}{{ secrets.SEED_ADMIN_MOBILE }}
-                SEED_ADMIN_EMAIL: ${GHA}{{ secrets.SEED_ADMIN_EMAIL }}
-                SEED_ADMIN_PASSWORD: ${GHA}{{ secrets.SEED_ADMIN_PASSWORD }}
-
-              steps:
-                - name: Checkout repository
-                  uses: actions/checkout@v4
-
-                - name: Setup Node.js
-                  uses: actions/setup-node@v4
-                  with:
-                    node-version: 22
-
-                - name: Install dependencies
-                  run: npm install
-
-                - name: Generate Prisma Client
-                  run: npx prisma generate
-
-                - name: Push Prisma schema to database
-                  run: npx prisma db push
-
-                - name: Seed database
-                  if: ${GHA}{{ github.event.inputs.run_seed == 'yes' }}
-                  run: npm run db:seed
-          EOF
-
           cat > docs/DEPLOYMENT.md <<'EOF'
           # راهنمای Deploy آنلاین سرویسیار
 
-          این پروژه برای اجرای آنلاین با این ترکیب آماده شده است:
+          برای اجرای آنلاین سرویسیار بدون کامپیوتر، پیشنهاد می‌شود از این ترکیب استفاده کنید:
 
           - GitHub برای نگهداری کد
           - Supabase یا Neon برای PostgreSQL
           - Vercel برای اجرای Next.js
 
-          ## 1. ساخت دیتابیس آنلاین
+          ## مرحله 1: ساخت دیتابیس
 
-          یکی از این سرویس‌ها را انتخاب کنید:
+          یکی از سرویس‌های زیر را انتخاب کنید:
 
           - https://supabase.com
           - https://neon.tech
 
-          بعد از ساخت دیتابیس، مقدار `DATABASE_URL` را بردارید.
+          بعد از ساخت دیتابیس، مقدار `DATABASE_URL` را دریافت کنید.
 
-          ## 2. ثبت Secretها در GitHub
+          ## مرحله 2: ثبت Environment Variable در Vercel
 
-          مسیر:
-
-          ```text
-          Repository → Settings → Secrets and variables → Actions → New repository secret
-          ```
-
-          این Secretها را اضافه کنید:
+          در Vercel، هنگام Deploy پروژه، این مقدار را اضافه کنید:
 
           ```text
           DATABASE_URL
+          ```
+
+          همچنین این مقادیر برای Seed اولیه لازم هستند:
+
+          ```text
           SEED_ADMIN_NAME
           SEED_ADMIN_MOBILE
           SEED_ADMIN_EMAIL
           SEED_ADMIN_PASSWORD
           ```
 
-          مقدارهای نمونه:
+          نمونه:
 
           ```text
           SEED_ADMIN_NAME=مدیر کل سرویسیار
@@ -181,70 +87,70 @@ jobs:
           SEED_ADMIN_PASSWORD=Admin@123456
           ```
 
-          ## 3. ساخت جدول‌ها و Seed
+          ## مرحله 3: Deploy روی Vercel
 
-          از تب Actions این Workflow را اجرا کنید:
+          1. وارد https://vercel.com شوید.
+          2. با GitHub لاگین کنید.
+          3. روی Add New Project بزنید.
+          4. Repository سرویسیار را انتخاب کنید.
+          5. Environment Variables را وارد کنید.
+          6. Deploy را بزنید.
 
-          ```text
-          Database Push and Seed
-          ```
+          ## تست سلامت پروژه
 
-          گزینه `run_seed` را روی `yes` بگذارید.
-
-          ## 4. Deploy روی Vercel
-
-          در Vercel پروژه GitHub را Import کنید و Environment Variables را وارد کنید.
-
-          مسیر تست:
+          بعد از Deploy این مسیر را باز کنید:
 
           ```text
           /api/health
           ```
 
-          اگر پاسخ `ok: true` برگشت، پروژه زنده است.
+          اگر پاسخ شامل `ok: true` بود، پروژه زنده است.
 
           ## هشدار امنیتی
 
-          هیچ‌وقت این موارد را داخل فایل‌های GitHub ننویسید:
+          هیچ‌وقت این موارد را داخل GitHub Commit نکنید:
 
           - GitHub Token
           - DATABASE_URL واقعی
           - رمز دیتابیس
           - رمز مدیر کل
-          - کلیدهای پیامک یا پرداخت
+          - کلید پیامک
+          - کلید درگاه پرداخت
           EOF
 
           cat > docs/PRODUCT_ROADMAP.md <<'EOF'
           # نقشه راه محصول سرویسیار
 
-          ## MVP فعلی
+          ## امکانات MVP فعلی
 
           - ورود و ثبت‌نام
           - ساخت کسب‌وکار
-          - فعال‌سازی لایسنس
-          - مشتریان
-          - آدرس‌ها
-          - دستگاه‌ها
-          - درخواست‌های تعمیر
-          - تکنسین‌ها
-          - گزارش تعمیر
-          - فاکتور
-          - چاپ فاکتور
+          - فعال‌سازی با کد لایسنس
+          - مدیریت مشتریان
+          - مدیریت آدرس مشتری
+          - مدیریت دستگاه مشتری
+          - ثبت درخواست تعمیر
+          - مدیریت وضعیت درخواست
+          - مدیریت تکنسین‌ها
+          - ثبت گزارش تعمیر
+          - صدور فاکتور
+          - چاپ فاکتور فارسی
           - پنل مدیر کل
           - مدیریت لایسنس‌ها
-          - مدیریت ماژول‌های کسب‌وکار
+          - مدیریت ماژول‌های فعال هر کسب‌وکار
 
           ## فازهای بعدی
 
           1. تنظیمات کسب‌وکار
-          2. پروفایل کاربر و تغییر رمز
-          3. گزارش‌های مدیریتی
-          4. گارانتی خدمات
-          5. پیامک
-          6. انبار قطعات
-          7. درگاه پرداخت
-          8. پنل مشتری نهایی
-          9. PWA موبایل
+          2. پروفایل کاربر
+          3. تغییر رمز
+          4. گزارش‌های مدیریتی
+          5. گارانتی خدمات
+          6. پیامک
+          7. انبار قطعات
+          8. درگاه پرداخت
+          9. پنل مشتری نهایی
+          10. PWA موبایل
           EOF
 
           cat > docs/SECURITY_NOTES.md <<'EOF'
@@ -267,7 +173,7 @@ jobs:
           - OTP پیامکی
           - بررسی وضعیت License در همه عملیات
           - بکاپ دیتابیس
-          - مانیتورینگ خطا با Sentry
+          - مانیتورینگ خطا
           EOF
 
           node <<'NODE'
@@ -276,18 +182,28 @@ jobs:
           const path = "package.json";
           const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
 
-          pkg.scripts = {
-            ...pkg.scripts,
-            dev: pkg.scripts?.dev || "next dev",
-            build: pkg.scripts?.build || "next build",
-            start: pkg.scripts?.start || "next start",
-            postinstall: "prisma generate",
-            "prisma:generate": "prisma generate",
-            "prisma:push": "prisma db push",
-            "prisma:studio": "prisma studio",
-            "db:seed": "prisma db seed",
-            "db:push-seed": "prisma db push && prisma db seed"
-          };
+          if (!pkg.scripts) {
+            pkg.scripts = {};
+          }
+
+          if (!pkg.scripts.dev) {
+            pkg.scripts.dev = "next dev";
+          }
+
+          if (!pkg.scripts.build) {
+            pkg.scripts.build = "next build";
+          }
+
+          if (!pkg.scripts.start) {
+            pkg.scripts.start = "next start";
+          }
+
+          pkg.scripts.postinstall = "prisma generate";
+          pkg.scripts["prisma:generate"] = "prisma generate";
+          pkg.scripts["prisma:push"] = "prisma db push";
+          pkg.scripts["prisma:studio"] = "prisma studio";
+          pkg.scripts["db:seed"] = "prisma db seed";
+          pkg.scripts["db:push-seed"] = "prisma db push && prisma db seed";
 
           fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
           NODE
@@ -296,6 +212,8 @@ jobs:
           # سرویسیار
 
           **سرویسیار** یک وب اپلیکیشن فارسی، راست‌چین و ماژولار برای مدیریت خدمات پس از فروش و تعمیرات لوازم خانگی است.
+
+          هدف محصول این است که به تعمیرکاران، تیم‌های خدماتی و نمایندگی‌ها فروخته شود و با کد فعال‌سازی و ماژول‌های قابل انتخاب کار کند.
 
           ## امکانات MVP
 
@@ -340,6 +258,8 @@ jobs:
 
           ## راهنمای Deploy
 
+          راهنمای Deploy در این مسیر قرار دارد:
+
           ```text
           docs/DEPLOYMENT.md
           ```
@@ -352,7 +272,7 @@ jobs:
       - name: Commit generated files
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
@@ -362,7 +282,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Add deployment tools, CI, database workflow and docs"
+            git commit -m "Add deployment tools and documentation"
             git push
           fi
 
