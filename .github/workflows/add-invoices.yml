@@ -1,0 +1,1421 @@
+name: Add Invoices Module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate invoices module files
+        run: |
+          mkdir -p src/app/dashboard/invoices
+          mkdir -p 'src/app/dashboard/invoices/[invoiceId]'
+          mkdir -p 'src/app/dashboard/invoices/[invoiceId]/print'
+          mkdir -p 'src/app/dashboard/service-requests/[requestId]/invoice'
+
+          cat > src/app/dashboard/invoices/actions.ts <<'EOF'
+          "use server";
+
+          import { redirect } from "next/navigation";
+          import type { PaymentStatus } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requirePermission } from "@/lib/permissions";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          function cleanText(value: FormDataEntryValue | null) {
+            return String(value || "").trim();
+          }
+
+          function toMoney(value: FormDataEntryValue | null) {
+            const raw = String(value || "0")
+              .replace(/,/g, "")
+              .replace(/[^\d.-]/g, "");
+
+            const number = Number(raw);
+
+            if (Number.isNaN(number) || number < 0) {
+              return 0;
+            }
+
+            return number;
+          }
+
+          function errorRedirect(path: string, message: string): never {
+            redirect(`${path}?error=${encodeURIComponent(message)}`);
+          }
+
+          async function generateInvoiceNumber(tenantId: string) {
+            const year = new Date().getFullYear();
+            const prefix = `INV-${year}`;
+
+            const count = await prisma.invoice.count({
+              where: {
+                tenantId,
+                invoiceNumber: {
+                  startsWith: prefix
+                }
+              }
+            });
+
+            const number = String(count + 1).padStart(5, "0");
+
+            return `${prefix}-${number}`;
+          }
+
+          const validPaymentStatuses: PaymentStatus[] = ["UNPAID", "PAID", "PARTIAL"];
+
+          export async function createInvoiceAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "invoices");
+            requirePermission(context.role, "invoices.create");
+
+            const requestId = cleanText(formData.get("requestId"));
+            const discount = toMoney(formData.get("discount"));
+            const tax = toMoney(formData.get("tax"));
+            const paymentStatusRaw = cleanText(formData.get("paymentStatus")) as PaymentStatus;
+
+            const paymentStatus: PaymentStatus = validPaymentStatuses.includes(paymentStatusRaw)
+              ? paymentStatusRaw
+              : "UNPAID";
+
+            if (!requestId) {
+              errorRedirect("/dashboard/service-requests", "شناسه درخواست معتبر نیست.");
+            }
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              },
+              include: {
+                invoice: true,
+                customer: true
+              }
+            });
+
+            if (!request) {
+              errorRedirect("/dashboard/service-requests", "درخواست تعمیر پیدا نشد.");
+            }
+
+            if (request.invoice) {
+              errorRedirect(
+                `/dashboard/service-requests/${requestId}`,
+                "برای این درخواست قبلاً فاکتور صادر شده است."
+              );
+            }
+
+            const titles = formData.getAll("itemTitle").map((item) => String(item || "").trim());
+            const quantities = formData.getAll("itemQuantity");
+            const unitPrices = formData.getAll("itemUnitPrice");
+
+            const items = titles
+              .map((title, index) => {
+                const quantityRaw = Number(String(quantities[index] || "1"));
+                const quantity = Number.isNaN(quantityRaw) || quantityRaw <= 0 ? 1 : quantityRaw;
+                const unitPrice = toMoney(unitPrices[index] || "0");
+                const total = quantity * unitPrice;
+
+                return {
+                  title,
+                  quantity,
+                  unitPrice,
+                  total
+                };
+              })
+              .filter((item) => item.title && item.total > 0);
+
+            if (items.length === 0) {
+              errorRedirect(
+                `/dashboard/service-requests/${requestId}/invoice`,
+                "حداقل یک آیتم معتبر برای فاکتور وارد کنید."
+              );
+            }
+
+            const subtotal = items.reduce((sum, item) => sum + item.total, 0);
+            const total = Math.max(subtotal - discount + tax, 0);
+            const invoiceNumber = await generateInvoiceNumber(context.tenantId);
+
+            const invoice = await prisma.$transaction(async (tx) => {
+              const createdInvoice = await tx.invoice.create({
+                data: {
+                  tenantId: context.tenantId,
+                  serviceRequestId: request.id,
+                  customerId: request.customerId,
+                  invoiceNumber,
+                  subtotal,
+                  discount,
+                  tax,
+                  total,
+                  paymentStatus
+                }
+              });
+
+              for (const item of items) {
+                await tx.invoiceItem.create({
+                  data: {
+                    tenantId: context.tenantId,
+                    invoiceId: createdInvoice.id,
+                    title: item.title,
+                    quantity: item.quantity,
+                    unitPrice: item.unitPrice,
+                    total: item.total
+                  }
+                });
+              }
+
+              await tx.auditLog.create({
+                data: {
+                  tenantId: context.tenantId,
+                  userId: context.user.id,
+                  action: "invoice.created",
+                  entityType: "Invoice",
+                  entityId: createdInvoice.id,
+                  metadata: {
+                    invoiceNumber,
+                    serviceRequestId: request.id,
+                    total
+                  }
+                }
+              });
+
+              return createdInvoice;
+            });
+
+            redirect(`/dashboard/invoices/${invoice.id}`);
+          }
+
+          export async function updateInvoicePaymentStatusAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "invoices");
+            requirePermission(context.role, "invoices.update_payment");
+
+            const invoiceId = cleanText(formData.get("invoiceId"));
+            const paymentStatusRaw = cleanText(formData.get("paymentStatus")) as PaymentStatus;
+
+            if (!invoiceId || !validPaymentStatuses.includes(paymentStatusRaw)) {
+              errorRedirect("/dashboard/invoices", "اطلاعات وضعیت پرداخت معتبر نیست.");
+            }
+
+            const invoice = await prisma.invoice.findFirst({
+              where: {
+                id: invoiceId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!invoice) {
+              errorRedirect("/dashboard/invoices", "فاکتور پیدا نشد.");
+            }
+
+            await prisma.invoice.update({
+              where: {
+                id: invoiceId
+              },
+              data: {
+                paymentStatus: paymentStatusRaw
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "invoice.payment_status_updated",
+                entityType: "Invoice",
+                entityId: invoiceId,
+                metadata: {
+                  from: invoice.paymentStatus,
+                  to: paymentStatusRaw
+                }
+              }
+            });
+
+            redirect(
+              `/dashboard/invoices/${invoiceId}?success=${encodeURIComponent(
+                "وضعیت پرداخت فاکتور ذخیره شد."
+              )}`
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/invoices/page.tsx <<'EOF'
+          import Link from "next/link";
+          import type { PaymentStatus } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          const paymentStatusLabels: Record<PaymentStatus, string> = {
+            UNPAID: "پرداخت‌نشده",
+            PAID: "پرداخت‌شده",
+            PARTIAL: "پرداخت بخشی"
+          };
+
+          const paymentOptions: Array<{ value: PaymentStatus | ""; label: string }> = [
+            { value: "", label: "همه وضعیت‌ها" },
+            { value: "UNPAID", label: "پرداخت‌نشده" },
+            { value: "PAID", label: "پرداخت‌شده" },
+            { value: "PARTIAL", label: "پرداخت بخشی" }
+          ];
+
+          const validPaymentStatuses = paymentOptions
+            .map((item) => item.value)
+            .filter(Boolean) as PaymentStatus[];
+
+          export default async function InvoicesPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ q?: string; paymentStatus?: string; error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "invoices");
+
+            const params = await searchParams;
+            const q = String(params?.q || "").trim();
+            const paymentStatusRaw = String(params?.paymentStatus || "").trim() as PaymentStatus;
+            const paymentStatus = validPaymentStatuses.includes(paymentStatusRaw)
+              ? paymentStatusRaw
+              : undefined;
+
+            const invoices = await prisma.invoice.findMany({
+              where: {
+                tenantId: context.tenantId,
+                ...(paymentStatus ? { paymentStatus } : {}),
+                ...(q
+                  ? {
+                      OR: [
+                        {
+                          invoiceNumber: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          serviceRequest: {
+                            trackingCode: {
+                              contains: q,
+                              mode: "insensitive"
+                            }
+                          }
+                        },
+                        {
+                          customer: {
+                            OR: [
+                              {
+                                firstName: {
+                                  contains: q,
+                                  mode: "insensitive"
+                                }
+                              },
+                              {
+                                lastName: {
+                                  contains: q,
+                                  mode: "insensitive"
+                                }
+                              },
+                              {
+                                mobile: {
+                                  contains: q
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  : {})
+              },
+              include: {
+                customer: true,
+                serviceRequest: {
+                  include: {
+                    appliance: true
+                  }
+                },
+                items: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              },
+              take: 100
+            });
+
+            const totalAmount = invoices.reduce(
+              (sum, invoice) => sum + Number(invoice.total),
+              0
+            );
+
+            const paidAmount = invoices
+              .filter((invoice) => invoice.paymentStatus === "PAID")
+              .reduce((sum, invoice) => sum + Number(invoice.total), 0);
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <Link href="/dashboard/invoices">فاکتورها</Link>
+                      <Link href="/auth/activate">اشتراک و لایسنس</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">مدیریت مالی</span>
+                      <h1>فاکتورها</h1>
+                      <p className="muted">
+                        فاکتورهای صادرشده برای درخواست‌های تعمیر را مشاهده و مدیریت کنید.
+                      </p>
+                    </div>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+                  {params?.success ? <div className="alert success">{params.success}</div> : null}
+
+                  <section className="stats-grid">
+                    <div className="stat-card small">
+                      <span>تعداد فاکتورها</span>
+                      <strong>{invoices.length}</strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>مجموع فاکتورها</span>
+                      <strong className="stat-text">
+                        {totalAmount.toLocaleString("fa-IR")} تومان
+                      </strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>پرداخت‌شده</span>
+                      <strong className="stat-text">
+                        {paidAmount.toLocaleString("fa-IR")} تومان
+                      </strong>
+                    </div>
+                  </section>
+
+                  <section className="panel">
+                    <form className="search-form service-search">
+                      <input
+                        name="q"
+                        defaultValue={q}
+                        placeholder="جستجو با شماره فاکتور، کد پیگیری، نام یا موبایل مشتری"
+                      />
+
+                      <select name="paymentStatus" defaultValue={paymentStatus || ""}>
+                        {paymentOptions.map((item) => (
+                          <option key={item.value || "all"} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button className="button compact" type="submit">
+                        جستجو
+                      </button>
+
+                      {(q || paymentStatus) ? (
+                        <Link className="secondary-link" href="/dashboard/invoices">
+                          حذف فیلتر
+                        </Link>
+                      ) : null}
+                    </form>
+                  </section>
+
+                  <section className="panel">
+                    {invoices.length === 0 ? (
+                      <div className="empty-state">
+                        <h3>هنوز فاکتوری صادر نشده است</h3>
+                        <p className="muted">
+                          برای صدور فاکتور، وارد جزئیات یک درخواست تعمیر شوید و گزینه صدور فاکتور را انتخاب کنید.
+                        </p>
+                        <Link className="button" href="/dashboard/service-requests">
+                          مشاهده درخواست‌های تعمیر
+                        </Link>
+                      </div>
+                    ) : (
+                      <div className="table-wrapper">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>شماره فاکتور</th>
+                              <th>کد درخواست</th>
+                              <th>مشتری</th>
+                              <th>دستگاه</th>
+                              <th>مبلغ نهایی</th>
+                              <th>وضعیت پرداخت</th>
+                              <th>تاریخ صدور</th>
+                              <th>عملیات</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {invoices.map((invoice) => (
+                              <tr key={invoice.id}>
+                                <td dir="ltr">
+                                  <strong>{invoice.invoiceNumber}</strong>
+                                </td>
+                                <td dir="ltr">{invoice.serviceRequest.trackingCode}</td>
+                                <td>
+                                  {invoice.customer.firstName} {invoice.customer.lastName || ""}
+                                  <br />
+                                  <small dir="ltr">{invoice.customer.mobile}</small>
+                                </td>
+                                <td>
+                                  {invoice.serviceRequest.appliance.type}
+                                  <br />
+                                  <small>{invoice.serviceRequest.appliance.brand || "برند نامشخص"}</small>
+                                </td>
+                                <td>{Number(invoice.total).toLocaleString("fa-IR")} تومان</td>
+                                <td>
+                                  <span className={`payment-pill payment-${invoice.paymentStatus.toLowerCase()}`}>
+                                    {paymentStatusLabels[invoice.paymentStatus]}
+                                  </span>
+                                </td>
+                                <td>{invoice.createdAt.toLocaleDateString("fa-IR")}</td>
+                                <td>
+                                  <div className="table-actions">
+                                    <Link
+                                      className="table-action"
+                                      href={`/dashboard/invoices/${invoice.id}`}
+                                    >
+                                      مشاهده
+                                    </Link>
+                                    <Link
+                                      className="table-action green"
+                                      href={`/dashboard/invoices/${invoice.id}/print`}
+                                    >
+                                      چاپ
+                                    </Link>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/service-requests/[requestId]/invoice/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound, redirect } from "next/navigation";
+          import { createInvoiceAction } from "@/app/dashboard/invoices/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function CreateInvoiceForRequestPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ requestId: string }>;
+            searchParams?: Promise<{ error?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "invoices");
+
+            const { requestId } = await params;
+            const query = await searchParams;
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              },
+              include: {
+                customer: true,
+                appliance: true,
+                address: true,
+                invoice: true,
+                reports: {
+                  orderBy: {
+                    createdAt: "desc"
+                  },
+                  take: 1
+                }
+              }
+            });
+
+            if (!request) {
+              notFound();
+            }
+
+            if (request.invoice) {
+              redirect(`/dashboard/invoices/${request.invoice.id}`);
+            }
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <Link href="/dashboard/invoices">فاکتورها</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">صدور فاکتور</span>
+                      <h1>صدور فاکتور برای درخواست</h1>
+                      <p className="muted">
+                        درخواست: <span dir="ltr">{request.trackingCode}</span> - مشتری:{" "}
+                        {request.customer.firstName} {request.customer.lastName || ""}
+                      </p>
+                    </div>
+
+                    <Link
+                      className="ghost-light-button"
+                      href={`/dashboard/service-requests/${request.id}`}
+                    >
+                      بازگشت به درخواست
+                    </Link>
+                  </header>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>خلاصه درخواست</h3>
+
+                      <div className="info-list">
+                        <p>
+                          <strong>کد پیگیری:</strong>{" "}
+                          <span dir="ltr">{request.trackingCode}</span>
+                        </p>
+                        <p>
+                          <strong>مشتری:</strong> {request.customer.firstName}{" "}
+                          {request.customer.lastName || ""}
+                        </p>
+                        <p>
+                          <strong>موبایل:</strong>{" "}
+                          <span dir="ltr">{request.customer.mobile}</span>
+                        </p>
+                        <p>
+                          <strong>دستگاه:</strong> {request.appliance.type}
+                          {request.appliance.brand ? ` - ${request.appliance.brand}` : ""}
+                          {request.appliance.model ? ` - ${request.appliance.model}` : ""}
+                        </p>
+                        <p>
+                          <strong>شرح مشکل:</strong> {request.problemDescription}
+                        </p>
+                        {request.reports[0] ? (
+                          <p>
+                            <strong>آخرین گزارش:</strong> {request.reports[0].workDone}
+                          </p>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="panel">
+                      <h3>فرم فاکتور</h3>
+
+                      <form action={createInvoiceAction} className="form">
+                        <input type="hidden" name="requestId" value={request.id} />
+
+                        <div className="invoice-items-box">
+                          <h4>آیتم‌های فاکتور</h4>
+
+                          <div className="invoice-item-row header">
+                            <span>عنوان</span>
+                            <span>تعداد</span>
+                            <span>قیمت واحد، تومان</span>
+                          </div>
+
+                          <div className="invoice-item-row">
+                            <input name="itemTitle" defaultValue="اجرت تعمیر" />
+                            <input name="itemQuantity" type="number" min="1" defaultValue="1" />
+                            <input name="itemUnitPrice" type="number" min="0" placeholder="0" />
+                          </div>
+
+                          <div className="invoice-item-row">
+                            <input name="itemTitle" defaultValue="قطعه مصرفی" />
+                            <input name="itemQuantity" type="number" min="1" defaultValue="1" />
+                            <input name="itemUnitPrice" type="number" min="0" placeholder="0" />
+                          </div>
+
+                          <div className="invoice-item-row">
+                            <input name="itemTitle" defaultValue="ایاب و ذهاب" />
+                            <input name="itemQuantity" type="number" min="1" defaultValue="1" />
+                            <input name="itemUnitPrice" type="number" min="0" placeholder="0" />
+                          </div>
+
+                          <div className="invoice-item-row">
+                            <input name="itemTitle" placeholder="سایر" />
+                            <input name="itemQuantity" type="number" min="1" defaultValue="1" />
+                            <input name="itemUnitPrice" type="number" min="0" placeholder="0" />
+                          </div>
+                        </div>
+
+                        <div className="mini-grid">
+                          <label>
+                            تخفیف، تومان
+                            <input name="discount" type="number" min="0" defaultValue="0" />
+                          </label>
+
+                          <label>
+                            مالیات، تومان
+                            <input name="tax" type="number" min="0" defaultValue="0" />
+                          </label>
+                        </div>
+
+                        <label>
+                          وضعیت پرداخت
+                          <select name="paymentStatus" defaultValue="UNPAID">
+                            <option value="UNPAID">پرداخت‌نشده</option>
+                            <option value="PARTIAL">پرداخت بخشی</option>
+                            <option value="PAID">پرداخت‌شده</option>
+                          </select>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          صدور فاکتور
+                        </button>
+                      </form>
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/invoices/[invoiceId]/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound } from "next/navigation";
+          import { updateInvoicePaymentStatusAction } from "@/app/dashboard/invoices/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          const paymentStatusLabels = {
+            UNPAID: "پرداخت‌نشده",
+            PAID: "پرداخت‌شده",
+            PARTIAL: "پرداخت بخشی"
+          } as const;
+
+          export default async function InvoiceDetailsPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ invoiceId: string }>;
+            searchParams?: Promise<{ error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "invoices");
+
+            const { invoiceId } = await params;
+            const query = await searchParams;
+
+            const invoice = await prisma.invoice.findFirst({
+              where: {
+                id: invoiceId,
+                tenantId: context.tenantId
+              },
+              include: {
+                customer: true,
+                serviceRequest: {
+                  include: {
+                    appliance: true,
+                    address: true
+                  }
+                },
+                items: true
+              }
+            });
+
+            if (!invoice) {
+              notFound();
+            }
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <Link href="/dashboard/invoices">فاکتورها</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">جزئیات فاکتور</span>
+                      <h1 dir="ltr">{invoice.invoiceNumber}</h1>
+                      <p className="muted">
+                        درخواست:{" "}
+                        <Link href={`/dashboard/service-requests/${invoice.serviceRequest.id}`}>
+                          <span dir="ltr">{invoice.serviceRequest.trackingCode}</span>
+                        </Link>
+                      </p>
+                    </div>
+
+                    <div className="header-actions">
+                      <Link className="ghost-light-button" href="/dashboard/invoices">
+                        بازگشت
+                      </Link>
+                      <Link
+                        className="button"
+                        href={`/dashboard/invoices/${invoice.id}/print`}
+                      >
+                        چاپ فاکتور
+                      </Link>
+                    </div>
+                  </header>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+                  {query?.success ? <div className="alert success">{query.success}</div> : null}
+
+                  <section className="stats-grid">
+                    <div className="stat-card small">
+                      <span>مبلغ نهایی</span>
+                      <strong className="stat-text">
+                        {Number(invoice.total).toLocaleString("fa-IR")} تومان
+                      </strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>وضعیت پرداخت</span>
+                      <strong className="stat-text">
+                        {paymentStatusLabels[invoice.paymentStatus]}
+                      </strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>تاریخ صدور</span>
+                      <strong className="stat-text">
+                        {invoice.createdAt.toLocaleDateString("fa-IR")}
+                      </strong>
+                    </div>
+                  </section>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>اطلاعات مشتری</h3>
+
+                      <div className="info-list">
+                        <p>
+                          <strong>نام:</strong> {invoice.customer.firstName}{" "}
+                          {invoice.customer.lastName || ""}
+                        </p>
+                        <p>
+                          <strong>موبایل:</strong>{" "}
+                          <span dir="ltr">{invoice.customer.mobile}</span>
+                        </p>
+                        <p>
+                          <strong>دستگاه:</strong> {invoice.serviceRequest.appliance.type}
+                          {invoice.serviceRequest.appliance.brand
+                            ? ` - ${invoice.serviceRequest.appliance.brand}`
+                            : ""}
+                          {invoice.serviceRequest.appliance.model
+                            ? ` - ${invoice.serviceRequest.appliance.model}`
+                            : ""}
+                        </p>
+                        <p>
+                          <strong>آدرس:</strong> {invoice.serviceRequest.address.city} -{" "}
+                          {invoice.serviceRequest.address.address}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="panel">
+                      <h3>تغییر وضعیت پرداخت</h3>
+
+                      <form action={updateInvoicePaymentStatusAction} className="form">
+                        <input type="hidden" name="invoiceId" value={invoice.id} />
+
+                        <label>
+                          وضعیت پرداخت
+                          <select name="paymentStatus" defaultValue={invoice.paymentStatus}>
+                            <option value="UNPAID">پرداخت‌نشده</option>
+                            <option value="PARTIAL">پرداخت بخشی</option>
+                            <option value="PAID">پرداخت‌شده</option>
+                          </select>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ذخیره وضعیت پرداخت
+                        </button>
+                      </form>
+                    </div>
+                  </section>
+
+                  <section className="panel">
+                    <h3>آیتم‌های فاکتور</h3>
+
+                    <div className="table-wrapper">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>عنوان</th>
+                            <th>تعداد</th>
+                            <th>قیمت واحد</th>
+                            <th>جمع</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {invoice.items.map((item) => (
+                            <tr key={item.id}>
+                              <td>{item.title}</td>
+                              <td>{item.quantity}</td>
+                              <td>{Number(item.unitPrice).toLocaleString("fa-IR")} تومان</td>
+                              <td>{Number(item.total).toLocaleString("fa-IR")} تومان</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div className="invoice-summary">
+                      <p>
+                        <span>جمع جزء:</span>
+                        <strong>{Number(invoice.subtotal).toLocaleString("fa-IR")} تومان</strong>
+                      </p>
+                      <p>
+                        <span>تخفیف:</span>
+                        <strong>{Number(invoice.discount).toLocaleString("fa-IR")} تومان</strong>
+                      </p>
+                      <p>
+                        <span>مالیات:</span>
+                        <strong>{Number(invoice.tax).toLocaleString("fa-IR")} تومان</strong>
+                      </p>
+                      <p className="grand-total">
+                        <span>مبلغ نهایی:</span>
+                        <strong>{Number(invoice.total).toLocaleString("fa-IR")} تومان</strong>
+                      </p>
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/invoices/[invoiceId]/print/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound } from "next/navigation";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          const paymentStatusLabels = {
+            UNPAID: "پرداخت‌نشده",
+            PAID: "پرداخت‌شده",
+            PARTIAL: "پرداخت بخشی"
+          } as const;
+
+          export default async function PrintInvoicePage({
+            params
+          }: {
+            params: Promise<{ invoiceId: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "invoices");
+
+            const { invoiceId } = await params;
+
+            const invoice = await prisma.invoice.findFirst({
+              where: {
+                id: invoiceId,
+                tenantId: context.tenantId
+              },
+              include: {
+                customer: true,
+                serviceRequest: {
+                  include: {
+                    appliance: true,
+                    address: true
+                  }
+                },
+                items: true,
+                tenant: true
+              }
+            });
+
+            if (!invoice) {
+              notFound();
+            }
+
+            return (
+              <main className="print-page">
+                <div className="print-actions no-print">
+                  <Link className="ghost-light-button" href={`/dashboard/invoices/${invoice.id}`}>
+                    بازگشت
+                  </Link>
+                  <button className="button" type="button" onClick={undefined}>
+                    از منوی مرورگر چاپ کنید
+                  </button>
+                </div>
+
+                <section className="print-invoice">
+                  <header className="print-header">
+                    <div>
+                      <h1>{invoice.tenant.name}</h1>
+                      <p>فاکتور خدمات تعمیر و سرویس لوازم خانگی</p>
+                    </div>
+
+                    <div className="print-meta">
+                      <p>
+                        <strong>شماره فاکتور:</strong>{" "}
+                        <span dir="ltr">{invoice.invoiceNumber}</span>
+                      </p>
+                      <p>
+                        <strong>تاریخ:</strong>{" "}
+                        {invoice.createdAt.toLocaleDateString("fa-IR")}
+                      </p>
+                      <p>
+                        <strong>وضعیت پرداخت:</strong>{" "}
+                        {paymentStatusLabels[invoice.paymentStatus]}
+                      </p>
+                    </div>
+                  </header>
+
+                  <section className="print-grid">
+                    <div>
+                      <h3>مشخصات مشتری</h3>
+                      <p>
+                        <strong>نام:</strong> {invoice.customer.firstName}{" "}
+                        {invoice.customer.lastName || ""}
+                      </p>
+                      <p>
+                        <strong>موبایل:</strong>{" "}
+                        <span dir="ltr">{invoice.customer.mobile}</span>
+                      </p>
+                      <p>
+                        <strong>آدرس:</strong> {invoice.serviceRequest.address.city} -{" "}
+                        {invoice.serviceRequest.address.address}
+                      </p>
+                    </div>
+
+                    <div>
+                      <h3>مشخصات درخواست</h3>
+                      <p>
+                        <strong>کد پیگیری:</strong>{" "}
+                        <span dir="ltr">{invoice.serviceRequest.trackingCode}</span>
+                      </p>
+                      <p>
+                        <strong>دستگاه:</strong> {invoice.serviceRequest.appliance.type}
+                        {invoice.serviceRequest.appliance.brand
+                          ? ` - ${invoice.serviceRequest.appliance.brand}`
+                          : ""}
+                        {invoice.serviceRequest.appliance.model
+                          ? ` - ${invoice.serviceRequest.appliance.model}`
+                          : ""}
+                      </p>
+                      <p>
+                        <strong>شرح مشکل:</strong>{" "}
+                        {invoice.serviceRequest.problemDescription}
+                      </p>
+                    </div>
+                  </section>
+
+                  <section>
+                    <h3>اقلام فاکتور</h3>
+
+                    <table className="print-table">
+                      <thead>
+                        <tr>
+                          <th>ردیف</th>
+                          <th>شرح</th>
+                          <th>تعداد</th>
+                          <th>قیمت واحد</th>
+                          <th>جمع</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {invoice.items.map((item, index) => (
+                          <tr key={item.id}>
+                            <td>{index + 1}</td>
+                            <td>{item.title}</td>
+                            <td>{item.quantity}</td>
+                            <td>{Number(item.unitPrice).toLocaleString("fa-IR")} تومان</td>
+                            <td>{Number(item.total).toLocaleString("fa-IR")} تومان</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </section>
+
+                  <section className="print-summary">
+                    <p>
+                      <span>جمع جزء:</span>
+                      <strong>{Number(invoice.subtotal).toLocaleString("fa-IR")} تومان</strong>
+                    </p>
+                    <p>
+                      <span>تخفیف:</span>
+                      <strong>{Number(invoice.discount).toLocaleString("fa-IR")} تومان</strong>
+                    </p>
+                    <p>
+                      <span>مالیات:</span>
+                      <strong>{Number(invoice.tax).toLocaleString("fa-IR")} تومان</strong>
+                    </p>
+                    <p className="grand-total">
+                      <span>مبلغ نهایی:</span>
+                      <strong>{Number(invoice.total).toLocaleString("fa-IR")} تومان</strong>
+                    </p>
+                  </section>
+
+                  <footer className="print-footer">
+                    <div>
+                      <p>امضای مشتری</p>
+                    </div>
+                    <div>
+                      <p>مهر و امضای مرکز خدمات</p>
+                    </div>
+                  </footer>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat >> src/app/globals.css <<'EOF'
+
+          /* Invoices module */
+
+          .header-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+          }
+
+          .payment-pill {
+            display: inline-flex;
+            border-radius: 999px;
+            padding: 7px 10px;
+            font-size: 13px;
+            font-weight: 900;
+            white-space: nowrap;
+          }
+
+          .payment-unpaid {
+            background: #fee2e2;
+            color: #991b1b;
+          }
+
+          .payment-paid {
+            background: #dcfce7;
+            color: #166534;
+          }
+
+          .payment-partial {
+            background: #fef3c7;
+            color: #92400e;
+          }
+
+          .invoice-items-box {
+            display: grid;
+            gap: 10px;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 14px;
+            background: #f8fafc;
+          }
+
+          .invoice-items-box h4 {
+            margin: 0 0 6px;
+          }
+
+          .invoice-item-row {
+            display: grid;
+            grid-template-columns: 1fr 100px 160px;
+            gap: 8px;
+            align-items: center;
+          }
+
+          .invoice-item-row.header {
+            color: #64748b;
+            font-size: 13px;
+            font-weight: 800;
+          }
+
+          .invoice-summary,
+          .print-summary {
+            max-width: 420px;
+            margin-right: auto;
+            margin-top: 20px;
+            display: grid;
+            gap: 8px;
+          }
+
+          .invoice-summary p,
+          .print-summary p {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 0;
+            padding: 10px 0;
+            border-bottom: 1px solid #e5e7eb;
+          }
+
+          .invoice-summary .grand-total,
+          .print-summary .grand-total {
+            font-size: 20px;
+            color: #0f172a;
+            border-bottom: none;
+          }
+
+          .print-page {
+            min-height: 100vh;
+            background: #e5e7eb;
+            padding: 24px;
+          }
+
+          .print-actions {
+            max-width: 900px;
+            margin: 0 auto 16px;
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+          }
+
+          .print-invoice {
+            max-width: 900px;
+            margin: 0 auto;
+            background: #ffffff;
+            color: #111827;
+            padding: 36px;
+            border-radius: 18px;
+            box-shadow: 0 20px 60px rgba(15, 23, 42, 0.12);
+          }
+
+          .print-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 24px;
+            border-bottom: 2px solid #0f172a;
+            padding-bottom: 18px;
+            margin-bottom: 24px;
+          }
+
+          .print-header h1 {
+            margin: 0 0 8px;
+          }
+
+          .print-meta {
+            min-width: 260px;
+          }
+
+          .print-meta p {
+            margin: 6px 0;
+          }
+
+          .print-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 24px;
+            margin-bottom: 24px;
+          }
+
+          .print-grid h3,
+          .print-invoice h3 {
+            margin-top: 0;
+          }
+
+          .print-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+          }
+
+          .print-table th,
+          .print-table td {
+            border: 1px solid #d1d5db;
+            padding: 10px;
+            text-align: right;
+          }
+
+          .print-table th {
+            background: #f3f4f6;
+          }
+
+          .print-footer {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 24px;
+            margin-top: 60px;
+          }
+
+          .print-footer div {
+            border-top: 1px solid #111827;
+            padding-top: 12px;
+            text-align: center;
+            min-height: 80px;
+          }
+
+          @media print {
+            body {
+              background: #ffffff;
+            }
+
+            .no-print {
+              display: none !important;
+            }
+
+            .print-page {
+              padding: 0;
+              background: #ffffff;
+            }
+
+            .print-invoice {
+              max-width: none;
+              box-shadow: none;
+              border-radius: 0;
+              padding: 20px;
+            }
+          }
+
+          @media (max-width: 820px) {
+            .invoice-item-row {
+              grid-template-columns: 1fr;
+            }
+
+            .invoice-item-row.header {
+              display: none;
+            }
+
+            .print-header,
+            .print-grid,
+            .print-footer {
+              grid-template-columns: 1fr;
+              display: grid;
+            }
+          }
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+
+          files = [
+              Path("src/app/dashboard/page.tsx"),
+              Path("src/app/dashboard/customers/page.tsx"),
+              Path("src/app/dashboard/customers/new/page.tsx"),
+              Path("src/app/dashboard/customers/[customerId]/page.tsx"),
+              Path("src/app/dashboard/service-requests/page.tsx"),
+              Path("src/app/dashboard/service-requests/new/page.tsx"),
+              Path("src/app/dashboard/service-requests/[requestId]/page.tsx"),
+              Path("src/app/dashboard/service-requests/[requestId]/report/page.tsx"),
+              Path("src/app/dashboard/technicians/page.tsx"),
+              Path("src/app/dashboard/technicians/new/page.tsx"),
+              Path("src/app/dashboard/technicians/[technicianUserId]/page.tsx"),
+          ]
+
+          for path in files:
+              if not path.exists():
+                  continue
+
+              text = path.read_text()
+
+              text = text.replace(
+                  '<a href="#">فاکتورها</a>',
+                  '<Link href="/dashboard/invoices">فاکتورها</Link>'
+              )
+
+              path.write_text(text)
+
+          # Improve invoice panel in service request details page
+          request_detail = Path("src/app/dashboard/service-requests/[requestId]/page.tsx")
+          if request_detail.exists():
+              text = request_detail.read_text()
+
+              old = '''<p className="muted">
+                          هنوز فاکتوری برای این درخواست صادر نشده است. ماژول فاکتور در مرحله بعدی تکمیل می‌شود.
+                        </p>'''
+
+              new = '''<div>
+                          <p className="muted">
+                            هنوز فاکتوری برای این درخواست صادر نشده است.
+                          </p>
+                          <Link
+                            className="button"
+                            href={`/dashboard/service-requests/${request.id}/invoice`}
+                          >
+                            صدور فاکتور
+                          </Link>
+                        </div>'''
+
+              text = text.replace(old, new)
+
+              old2 = '''<p>
+                            <strong>شماره فاکتور:</strong> {request.invoice.invoiceNumber}
+                          </p>'''
+
+              new2 = '''<p>
+                            <strong>شماره فاکتور:</strong>{" "}
+                            <Link href={`/dashboard/invoices/${request.invoice.id}`}>
+                              {request.invoice.invoiceNumber}
+                            </Link>
+                          </p>'''
+
+              text = text.replace(old2, new2)
+
+              request_detail.write_text(text)
+          PY
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add invoices and printable invoice module"
+            git push
+          fi
+
+      - name: Create ZIP file
+        run: |
+          zip -r servicyar-invoices.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-invoices
+          path: servicyar-invoices.zip
