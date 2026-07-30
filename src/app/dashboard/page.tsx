@@ -52,7 +52,7 @@ export default async function DashboardPage() {
         <nav>
           <Link href="/dashboard">داشبورد</Link>
           <a href="#">مشتریان</a>
-          <a href="#">درخواست‌های تعمیر</a>
+          <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
           <a href="#">تکنسین‌ها</a>
           <a href="#">فاکتورها</a>
           <Link href="/auth/activate">اشتراک و لایسنس</Link>
