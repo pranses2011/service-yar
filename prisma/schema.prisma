@@ -1,0 +1,421 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum GlobalRole {
+  USER
+  SUPER_ADMIN
+}
+
+enum TenantRole {
+  OWNER
+  ADMIN
+  OPERATOR
+  TECHNICIAN
+  ACCOUNTANT
+}
+
+enum TenantStatus {
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+}
+
+enum LicenseStatus {
+  UNUSED
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+  CANCELLED
+}
+
+enum ServiceRequestStatus {
+  NEW
+  PENDING_CALL
+  ASSIGNED
+  IN_PROGRESS
+  WAITING_FOR_PART
+  COMPLETED
+  CANCELLED
+}
+
+enum RequestPriority {
+  NORMAL
+  URGENT
+}
+
+enum PaymentStatus {
+  UNPAID
+  PAID
+  PARTIAL
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  name         String
+  mobile       String     @unique
+  email        String?    @unique
+  passwordHash String
+  globalRole   GlobalRole @default(USER)
+  isActive     Boolean    @default(true)
+
+  ownedTenants            Tenant[]         @relation("TenantOwner")
+  tenantMemberships       TenantUser[]
+  createdServiceRequests  ServiceRequest[] @relation("ServiceRequestCreator")
+  assignedServiceRequests ServiceRequest[] @relation("ServiceRequestTechnician")
+  serviceReports          ServiceReport[]  @relation("ReportTechnician")
+  auditLogs               AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([mobile])
+  @@index([globalRole])
+}
+
+model Tenant {
+  id          String       @id @default(uuid()) @db.Uuid
+  name        String
+  slug        String       @unique
+  mobile      String?
+  phone       String?
+  city        String?
+  address     String?
+  logoUrl     String?
+  status      TenantStatus @default(ACTIVE)
+
+  ownerUserId String @db.Uuid
+  owner       User   @relation("TenantOwner", fields: [ownerUserId], references: [id])
+
+  users           TenantUser[]
+  licenses        License[]
+  tenantModules   TenantModule[]
+  customers       Customer[]
+  addresses       CustomerAddress[]
+  appliances      Appliance[]
+  serviceRequests ServiceRequest[]
+  serviceReports  ServiceReport[]
+  invoices        Invoice[]
+  invoiceItems    InvoiceItem[]
+  auditLogs       AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerUserId])
+  @@index([status])
+}
+
+model TenantUser {
+  id       String     @id @default(uuid()) @db.Uuid
+  tenantId String     @db.Uuid
+  userId   String     @db.Uuid
+  role     TenantRole
+  isActive Boolean    @default(true)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([tenantId, role])
+}
+
+model Module {
+  id          String  @id @default(uuid()) @db.Uuid
+  code        String  @unique
+  nameFa      String
+  description String?
+  isActive    Boolean @default(true)
+
+  planModules   PlanModule[]
+  tenantModules TenantModule[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Plan {
+  id                 String   @id @default(uuid()) @db.Uuid
+  code               String   @unique
+  nameFa             String
+  description        String?
+  priceMonthly       Decimal? @db.Decimal(18, 2)
+  priceYearly        Decimal? @db.Decimal(18, 2)
+  maxUsers           Int
+  maxTechnicians     Int
+  maxMonthlyRequests Int?
+  isActive           Boolean  @default(true)
+
+  planModules PlanModule[]
+  licenses    License[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PlanModule {
+  id       String @id @default(uuid()) @db.Uuid
+  planId   String @db.Uuid
+  moduleId String @db.Uuid
+
+  plan   Plan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@unique([planId, moduleId])
+}
+
+model License {
+  id         String        @id @default(uuid()) @db.Uuid
+  licenseKey String        @unique
+  status     LicenseStatus @default(UNUSED)
+
+  tenantId String? @db.Uuid
+  planId   String  @db.Uuid
+
+  durationDays       Int @default(365)
+  maxUsers           Int
+  maxTechnicians     Int
+  maxMonthlyRequests Int?
+
+  startsAt    DateTime?
+  expiresAt   DateTime?
+  activatedAt DateTime?
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id])
+  plan   Plan    @relation(fields: [planId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([planId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model TenantModule {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @db.Uuid
+  moduleId  String  @db.Uuid
+  isEnabled Boolean @default(true)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, moduleId])
+}
+
+model Customer {
+  id        String  @id @default(uuid()) @db.Uuid
+  tenantId  String  @db.Uuid
+  firstName String
+  lastName  String?
+  mobile    String
+  phone     String?
+  notes     String?
+
+  tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  addresses       CustomerAddress[]
+  appliances      Appliance[]
+  serviceRequests ServiceRequest[]
+  invoices        Invoice[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, mobile])
+  @@index([tenantId])
+  @@index([mobile])
+}
+
+model CustomerAddress {
+  id          String  @id @default(uuid()) @db.Uuid
+  tenantId    String  @db.Uuid
+  customerId  String  @db.Uuid
+  city        String
+  address     String
+  postalCode  String?
+  plate       String?
+  unit        String?
+  description String?
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  serviceRequests ServiceRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([customerId])
+}
+
+model Appliance {
+  id           String  @id @default(uuid()) @db.Uuid
+  tenantId     String  @db.Uuid
+  customerId   String  @db.Uuid
+  type         String
+  brand        String?
+  model        String?
+  serialNumber String?
+  notes        String?
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  serviceRequests ServiceRequest[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([type])
+}
+
+model ServiceRequest {
+  id       String @id @default(uuid()) @db.Uuid
+  tenantId String @db.Uuid
+
+  customerId  String @db.Uuid
+  addressId   String @db.Uuid
+  applianceId String @db.Uuid
+
+  assignedTechnicianUserId String? @db.Uuid
+  createdByUserId          String  @db.Uuid
+
+  trackingCode       String
+  problemDescription String
+  status             ServiceRequestStatus @default(NEW)
+  priority           RequestPriority       @default(NORMAL)
+
+  scheduledAt   DateTime?
+  internalNotes String?
+
+  tenant    Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer  Customer        @relation(fields: [customerId], references: [id])
+  address   CustomerAddress @relation(fields: [addressId], references: [id])
+  appliance Appliance       @relation(fields: [applianceId], references: [id])
+
+  assignedTechnician User? @relation("ServiceRequestTechnician", fields: [assignedTechnicianUserId], references: [id])
+  createdBy          User  @relation("ServiceRequestCreator", fields: [createdByUserId], references: [id])
+
+  reports ServiceReport[]
+  invoice Invoice?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, trackingCode])
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model ServiceReport {
+  id              String @id @default(uuid()) @db.Uuid
+  tenantId        String @db.Uuid
+  serviceRequestId String @db.Uuid
+  technicianUserId String @db.Uuid
+
+  diagnosis       String
+  workDone        String
+  partsUsedText   String?
+  recommendations String?
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
+  technician     User           @relation("ReportTechnician", fields: [technicianUserId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([serviceRequestId])
+}
+
+model Invoice {
+  id              String @id @default(uuid()) @db.Uuid
+  tenantId        String @db.Uuid
+  serviceRequestId String @unique @db.Uuid
+  customerId      String @db.Uuid
+
+  invoiceNumber String
+  subtotal      Decimal @default(0) @db.Decimal(18, 2)
+  discount      Decimal @default(0) @db.Decimal(18, 2)
+  tax           Decimal @default(0) @db.Decimal(18, 2)
+  total         Decimal @default(0) @db.Decimal(18, 2)
+
+  paymentStatus PaymentStatus @default(UNPAID)
+
+  tenant         Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
+  customer       Customer       @relation(fields: [customerId], references: [id])
+
+  items InvoiceItem[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, invoiceNumber])
+  @@index([tenantId])
+  @@index([customerId])
+}
+
+model InvoiceItem {
+  id        String @id @default(uuid()) @db.Uuid
+  tenantId  String @db.Uuid
+  invoiceId String @db.Uuid
+
+  title     String
+  quantity  Int     @default(1)
+  unitPrice Decimal @default(0) @db.Decimal(18, 2)
+  total     Decimal @default(0) @db.Decimal(18, 2)
+
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([invoiceId])
+}
+
+model AuditLog {
+  id       String  @id @default(uuid()) @db.Uuid
+  tenantId String? @db.Uuid
+  userId   String? @db.Uuid
+
+  action     String
+  entityType String?
+  entityId   String?
+  metadata   Json?
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?   @relation(fields: [userId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+}

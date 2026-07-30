@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: servicyar-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: servicyar
+    ports:
+      - "5432:5432"
+    volumes:
+      - servicyar_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  servicyar_postgres_data:
