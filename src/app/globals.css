@@ -813,3 +813,104 @@ select:focus {
     display: grid;
   }
 }
+
+/* Super admin management */
+
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 20px 0;
+}
+
+.admin-nav a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: #e0f2fe;
+  color: #0369a1;
+  padding: 10px 14px;
+  font-weight: 900;
+}
+
+.inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.table-action.red {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.module-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.module-admin-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #e5e7eb;
+  background: #f8fafc;
+  border-radius: 16px;
+  padding: 16px;
+}
+
+.module-admin-card p {
+  margin: 6px 0;
+  color: #0369a1;
+  direction: ltr;
+  text-align: right;
+  font-weight: 800;
+}
+
+.module-admin-card small {
+  color: #64748b;
+  line-height: 1.8;
+}
+
+.pricing-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.pricing-card {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 22px;
+  padding: 22px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+}
+
+.pricing-card h3 {
+  margin-top: 0;
+}
+
+.pricing-card ul {
+  padding-right: 18px;
+  line-height: 2;
+  color: #374151;
+}
+
+.price {
+  margin: 18px 0;
+  font-size: 26px;
+  font-weight: 950;
+  color: #0f172a;
+}
+
+.price span {
+  font-size: 14px;
+  color: #64748b;
+  font-weight: 700;
+}

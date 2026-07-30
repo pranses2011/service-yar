@@ -1,30 +1,36 @@
-import { redirect } from "next/navigation";
+import Link from "next/link";
 import { logoutAction } from "@/app/auth/actions";
 import { prisma } from "@/lib/prisma";
-import { getCurrentSession } from "@/lib/session";
+import { requireSuperAdminContext } from "@/lib/super-admin-context";
 
 export default async function SuperAdminPage() {
-  const session = await getCurrentSession();
+  await requireSuperAdminContext();
 
-  if (!session) {
-    redirect("/auth/login");
-  }
-
-  if (session.user.globalRole !== "SUPER_ADMIN") {
-    redirect("/dashboard");
-  }
-
-  const [tenantsCount, usersCount, licensesCount, activeLicensesCount] =
-    await Promise.all([
-      prisma.tenant.count(),
-      prisma.user.count(),
-      prisma.license.count(),
-      prisma.license.count({
-        where: {
-          status: "ACTIVE"
-        }
-      })
-    ]);
+  const [
+    tenantsCount,
+    usersCount,
+    licensesCount,
+    activeLicensesCount,
+    unusedLicensesCount,
+    modulesCount,
+    plansCount
+  ] = await Promise.all([
+    prisma.tenant.count(),
+    prisma.user.count(),
+    prisma.license.count(),
+    prisma.license.count({
+      where: {
+        status: "ACTIVE"
+      }
+    }),
+    prisma.license.count({
+      where: {
+        status: "UNUSED"
+      }
+    }),
+    prisma.module.count(),
+    prisma.plan.count()
+  ]);
 
   return (
     <main className="container">
@@ -32,8 +38,16 @@ export default async function SuperAdminPage() {
         <span className="badge">Super Admin</span>
         <h1>پنل مدیر کل سرویسیار</h1>
         <p className="muted">
-          این صفحه نسخه اولیه پنل مالک پلتفرم است. در مراحل بعد مدیریت لایسنس‌ها، پلن‌ها و کسب‌وکارها کامل می‌شود.
+          از این بخش می‌توانید کسب‌وکارهای خریدار، لایسنس‌ها، پلن‌ها و ماژول‌های قابل فروش را مدیریت کنید.
         </p>
+
+        <div className="admin-nav">
+          <Link href="/super-admin/tenants">کسب‌وکارها</Link>
+          <Link href="/super-admin/licenses">لایسنس‌ها</Link>
+          <Link href="/super-admin/licenses/new">ساخت لایسنس</Link>
+          <Link href="/super-admin/plans">پلن‌ها</Link>
+          <Link href="/super-admin/modules">ماژول‌ها</Link>
+        </div>
 
         <form action={logoutAction}>
           <button className="button" type="submit">
@@ -61,6 +75,21 @@ export default async function SuperAdminPage() {
         <div className="stat-card">
           <span>لایسنس فعال</span>
           <strong>{activeLicensesCount}</strong>
+        </div>
+
+        <div className="stat-card">
+          <span>لایسنس آماده فروش</span>
+          <strong>{unusedLicensesCount}</strong>
+        </div>
+
+        <div className="stat-card">
+          <span>ماژول‌ها</span>
+          <strong>{modulesCount}</strong>
+        </div>
+
+        <div className="stat-card">
+          <span>پلن‌ها</span>
+          <strong>{plansCount}</strong>
         </div>
       </section>
     </main>
