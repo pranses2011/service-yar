@@ -1,0 +1,261 @@
+name: Add Iran Deploy Tools
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Iran deploy files
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p docs
+
+          cat > Dockerfile <<'EOF'
+          FROM node:22-alpine AS base
+
+          WORKDIR /app
+
+          ENV NODE_ENV=production
+
+          COPY package.json ./
+
+          RUN npm install
+
+          COPY . .
+
+          RUN npx prisma generate
+          RUN npm run build
+
+          EXPOSE 3000
+
+          CMD ["sh", "-c", "npm run start"]
+          EOF
+
+          cat > .dockerignore <<'EOF'
+          node_modules
+          .next
+          .git
+          .github
+          npm-debug.log
+          .env
+          .env.local
+          .env.production
+          .DS_Store
+          docs
+          EOF
+
+          node <<'NODE'
+          const fs = require("fs");
+
+          const path = "package.json";
+          const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+
+          if (!pkg.scripts) {
+            pkg.scripts = {};
+          }
+
+          pkg.scripts.dev = pkg.scripts.dev || "next dev";
+          pkg.scripts.build = pkg.scripts.build || "next build";
+          pkg.scripts.start = "next start -p ${PORT:-3000}";
+          pkg.scripts.postinstall = "prisma generate";
+          pkg.scripts["prisma:generate"] = "prisma generate";
+          pkg.scripts["prisma:push"] = "prisma db push";
+          pkg.scripts["prisma:studio"] = "prisma studio";
+          pkg.scripts["db:seed"] = "prisma db seed";
+          pkg.scripts["db:push-seed"] = "prisma db push && prisma db seed";
+
+          pkg.engines = {
+            node: ">=20"
+          };
+
+          fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          NODE
+
+          cat > docs/DEPLOYMENT_IRAN.md <<'EOF'
+          # راهنمای Deploy سرویسیار روی سرویس‌های قابل استفاده در ایران
+
+          اگر Vercel برای شما قابل استفاده نیست، پیشنهاد اصلی استفاده از Liara است.
+
+          ## گزینه پیشنهادی: Liara
+
+          آدرس:
+
+          ```text
+          https://liara.ir
+          ```
+
+          ## مسیر کلی Deploy
+
+          1. در Liara ثبت‌نام کنید.
+          2. یک سرویس جدید از نوع Node.js یا Docker بسازید.
+          3. پروژه GitHub سرویسیار را متصل کنید، یا فایل ZIP پروژه را آپلود کنید.
+          4. Environment Variables را وارد کنید.
+          5. پروژه را Deploy کنید.
+          6. مسیر `/api/health` را تست کنید.
+
+          ---
+
+          ## Environment Variables لازم
+
+          مهم‌ترین مقدار:
+
+          ```text
+          DATABASE_URL
+          ```
+
+          اگر Seed قبلاً از طریق GitHub Actions اجرا شده، این موارد فقط برای سازگاری باقی می‌مانند:
+
+          ```text
+          SEED_ADMIN_NAME
+          SEED_ADMIN_MOBILE
+          SEED_ADMIN_EMAIL
+          SEED_ADMIN_PASSWORD
+          ```
+
+          نمونه:
+
+          ```text
+          SEED_ADMIN_NAME=مدیر کل سرویسیار
+          SEED_ADMIN_MOBILE=09120000000
+          SEED_ADMIN_EMAIL=admin@servicyar.local
+          SEED_ADMIN_PASSWORD=یک رمز قوی
+          ```
+
+          > مقدار واقعی DATABASE_URL و رمزها را داخل GitHub، README یا چت قرار ندهید.
+
+          ---
+
+          ## اگر سرویس Node.js انتخاب کردید
+
+          Build Command:
+
+          ```bash
+          npm install && npx prisma generate && npm run build
+          ```
+
+          Start Command:
+
+          ```bash
+          npm run start
+          ```
+
+          اگر سرویس از PORT اختصاصی استفاده کند، اسکریپت start پروژه آن را می‌خواند.
+
+          ---
+
+          ## اگر سرویس Docker انتخاب کردید
+
+          پروژه یک فایل آماده دارد:
+
+          ```text
+          Dockerfile
+          ```
+
+          کافی است هاست شما Dockerfile را Build کند.
+
+          ---
+
+          ## تست سلامت
+
+          بعد از Deploy، این مسیر را باز کنید:
+
+          ```text
+          /api/health
+          ```
+
+          اگر پاسخ شبیه زیر بود، پروژه بالا آمده است:
+
+          ```json
+          {
+            "ok": true,
+            "app": "servicyar"
+          }
+          ```
+
+          ---
+
+          ## ورود مدیر کل
+
+          مسیر:
+
+          ```text
+          /auth/login
+          ```
+
+          اطلاعات ورود همان مقادیری است که هنگام Seed در GitHub Secrets تعریف کرده‌اید.
+
+          ---
+
+          ## نکته مهم درباره دیتابیس
+
+          اگر قبلاً دیتابیس را با Workflow زیر آماده کرده‌اید:
+
+          ```text
+          Database Push and Seed
+          ```
+
+          لازم نیست روی هاست دوباره Seed اجرا کنید.
+
+          فقط کافی است همان `DATABASE_URL` را در هاست وارد کنید.
+
+          اگر دیتابیس جدید در Liara ساختید، باید مقدار `DATABASE_URL` جدید را هم در GitHub Secrets و هم در هاست تنظیم کنید و دوباره Workflow دیتابیس را اجرا کنید.
+
+          ---
+
+          ## خطاهای رایج
+
+          ### خطای DATABASE_URL
+
+          یعنی متغیر محیطی دیتابیس تعریف نشده یا اشتباه است.
+
+          ### خطای Prisma Client
+
+          مطمئن شوید دستور زیر قبل از Build اجرا می‌شود:
+
+          ```bash
+          npx prisma generate
+          ```
+
+          ### خطای اتصال به دیتابیس
+
+          بررسی کنید دیتابیس اجازه اتصال از بیرون را می‌دهد و Connection String درست است.
+          EOF
+
+      - name: Commit generated files
+        shell: bash
+        run: |
+          set -e
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add Iran deployment tools and Docker support"
+            git push
+          fi
+
+      - name: Create ZIP file
+        shell: bash
+        run: |
+          zip -r servicyar-iran-deploy.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-iran-deploy
+          path: servicyar-iran-deploy.zip
