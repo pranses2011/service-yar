@@ -1,0 +1,577 @@
+name: Fix Dashboard Module Errors
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Patch module guards and dashboard pages
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p src/app/dashboard/module-unavailable
+          mkdir -p src/app/dashboard/subscription
+          mkdir -p src/app/dashboard/help
+
+          cat > src/lib/modules.ts <<'EOF'
+          import { redirect } from "next/navigation";
+          import { prisma } from "@/lib/prisma";
+
+          export async function getTenantActiveModules(tenantId: string) {
+            const tenantModules = await prisma.tenantModule.findMany({
+              where: {
+                tenantId,
+                isEnabled: true,
+                module: {
+                  isActive: true
+                }
+              },
+              include: {
+                module: true
+              }
+            });
+
+            return tenantModules.map((item) => item.module.code);
+          }
+
+          export function hasModule(activeModules: string[], moduleCode: string) {
+            return activeModules.includes(moduleCode);
+          }
+
+          /**
+           * اگر ماژول فعال نباشد، به جای throw خام، کاربر را به صفحه راهنما منتقل می‌کنیم.
+           * این کار مخصوص پنل‌های Next.js است تا روی Netlify خطای 500 دیده نشود.
+           */
+          export async function requireModule(tenantId: string, moduleCode: string) {
+            const activeModules = await getTenantActiveModules(tenantId);
+
+            if (!hasModule(activeModules, moduleCode)) {
+              redirect(`/dashboard/module-unavailable?module=${encodeURIComponent(moduleCode)}`);
+            }
+
+            return true;
+          }
+          EOF
+
+          cat > src/app/dashboard/module-unavailable/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { requireTenantContext } from "@/lib/tenant-context";
+          import { getTenantActiveModules } from "@/lib/modules";
+          import { getTenantActiveLicense } from "@/lib/license";
+
+          const moduleLabels: Record<string, string> = {
+            dashboard: "داشبورد",
+            customers: "مشتریان",
+            appliances: "دستگاه‌ها",
+            service_requests: "درخواست‌های تعمیر",
+            technicians: "تکنسین‌ها",
+            service_reports: "گزارش تعمیر",
+            invoices: "فاکتورها",
+            licenses: "لایسنس و اشتراک",
+            sms: "پیامک",
+            inventory: "انبار قطعات",
+            warranty: "گارانتی",
+            customer_portal: "پنل مشتری",
+            ai_assistant: "دستیار هوشمند"
+          };
+
+          export default async function ModuleUnavailablePage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ module?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            const params = await searchParams;
+
+            const moduleCode = String(params?.module || "");
+            const moduleName = moduleLabels[moduleCode] || moduleCode || "این بخش";
+
+            const [activeModules, activeLicense] = await Promise.all([
+              getTenantActiveModules(context.tenantId),
+              getTenantActiveLicense(context.tenantId)
+            ]);
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <Link href="/dashboard/invoices">فاکتورها</Link>
+                      <Link href="/dashboard/subscription">اشتراک و ماژول‌ها</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <section className="panel">
+                    <span className="badge">ماژول غیرفعال</span>
+                    <h1>دسترسی به «{moduleName}» فعال نیست</h1>
+
+                    <p className="muted">
+                      این بخش در پلن فعلی کسب‌وکار شما فعال نشده است یا لایسنس/ماژول آن هنوز برای این کسب‌وکار تنظیم نشده.
+                    </p>
+
+                    <div className="alert warning">
+                      اگر در حال تست هستید، بهتر است کسب‌وکار را با لایسنس پلن حرفه‌ای یا سازمانی بسازید.
+                    </div>
+
+                    <div className="info-list">
+                      <p>
+                        <strong>کسب‌وکار:</strong> {context.tenant.name}
+                      </p>
+
+                      <p>
+                        <strong>پلن فعلی:</strong>{" "}
+                        {activeLicense ? activeLicense.plan.nameFa : "اشتراک فعال پیدا نشد"}
+                      </p>
+
+                      <p>
+                        <strong>ماژول‌های فعال:</strong>{" "}
+                        {activeModules.length > 0 ? activeModules.join("، ") : "هیچ ماژولی فعال نیست"}
+                      </p>
+                    </div>
+
+                    <div className="header-actions">
+                      <Link className="button" href="/dashboard/subscription">
+                        مشاهده اشتراک و ماژول‌ها
+                      </Link>
+
+                      <Link className="ghost-light-button" href="/dashboard">
+                        بازگشت به داشبورد
+                      </Link>
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/subscription/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { prisma } from "@/lib/prisma";
+          import { requireTenantContext } from "@/lib/tenant-context";
+          import { getTenantActiveLicense } from "@/lib/license";
+
+          export default async function SubscriptionPage() {
+            const context = await requireTenantContext();
+
+            const [activeLicense, tenantModules] = await Promise.all([
+              getTenantActiveLicense(context.tenantId),
+              prisma.tenantModule.findMany({
+                where: {
+                  tenantId: context.tenantId
+                },
+                include: {
+                  module: true
+                },
+                orderBy: {
+                  createdAt: "asc"
+                }
+              })
+            ]);
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <Link href="/dashboard/invoices">فاکتورها</Link>
+                      <Link href="/dashboard/subscription">اشتراک و ماژول‌ها</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">اشتراک</span>
+                      <h1>اشتراک و ماژول‌های فعال</h1>
+                      <p className="muted">
+                        وضعیت پلن، لایسنس و امکانات فعال کسب‌وکار شما.
+                      </p>
+                    </div>
+
+                    <Link className="button" href="/auth/activate">
+                      فعال‌سازی یا تمدید
+                    </Link>
+                  </header>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>وضعیت لایسنس</h3>
+
+                      {activeLicense ? (
+                        <div className="info-list">
+                          <p>
+                            <strong>پلن:</strong> {activeLicense.plan.nameFa}
+                          </p>
+
+                          <p>
+                            <strong>کد لایسنس:</strong>{" "}
+                            <code>{activeLicense.licenseKey}</code>
+                          </p>
+
+                          <p>
+                            <strong>وضعیت:</strong> {activeLicense.status}
+                          </p>
+
+                          <p>
+                            <strong>تاریخ شروع:</strong>{" "}
+                            {activeLicense.startsAt
+                              ? activeLicense.startsAt.toLocaleDateString("fa-IR")
+                              : "-"}
+                          </p>
+
+                          <p>
+                            <strong>تاریخ پایان:</strong>{" "}
+                            {activeLicense.expiresAt
+                              ? activeLicense.expiresAt.toLocaleDateString("fa-IR")
+                              : "-"}
+                          </p>
+
+                          <p>
+                            <strong>حداکثر کاربران:</strong> {activeLicense.maxUsers}
+                          </p>
+
+                          <p>
+                            <strong>حداکثر تکنسین‌ها:</strong> {activeLicense.maxTechnicians}
+                          </p>
+
+                          <p>
+                            <strong>سقف درخواست ماهانه:</strong>{" "}
+                            {activeLicense.maxMonthlyRequests ?? "نامحدود"}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="alert warning">
+                          اشتراک فعالی برای این کسب‌وکار پیدا نشد. لطفاً لایسنس را فعال کنید.
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="panel">
+                      <h3>ماژول‌های فعال</h3>
+
+                      {tenantModules.length === 0 ? (
+                        <p className="muted">هنوز ماژولی برای این کسب‌وکار فعال نشده است.</p>
+                      ) : (
+                        <div className="module-admin-grid">
+                          {tenantModules.map((item) => (
+                            <article className="module-admin-card" key={item.id}>
+                              <div>
+                                <strong>{item.module.nameFa}</strong>
+                                <p>{item.module.code}</p>
+                                <small>{item.module.description || ""}</small>
+                              </div>
+
+                              <span className={item.isEnabled ? "active-pill" : "inactive-pill"}>
+                                {item.isEnabled ? "فعال" : "غیرفعال"}
+                              </span>
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="panel">
+                    <h3>راهنمای تست</h3>
+                    <p className="muted">
+                      اگر می‌خواهید همه بخش‌ها مثل تکنسین‌ها و فاکتورها را تست کنید، کسب‌وکار تستی را با پلن حرفه‌ای یا سازمانی بسازید.
+                    </p>
+
+                    <div className="hint-box">
+                      <strong>کدهای مناسب تست:</strong>
+                      <code>SERVICYAR-PRO-001-DEMO</code>
+                      <code>SERVICYAR-PRO-002-DEMO</code>
+                      <code>SERVICYAR-ENTERPRISE-001-DEMO</code>
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/help/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function DashboardHelpPage() {
+            const context = await requireTenantContext();
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <Link href="/dashboard/invoices">فاکتورها</Link>
+                      <Link href="/dashboard/subscription">اشتراک و ماژول‌ها</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <section className="panel">
+                    <span className="badge">راهنمای تست MVP</span>
+                    <h1>چطور سرویسیار را تست کنیم؟</h1>
+
+                    <ol className="guide-list">
+                      <li>یک مشتری جدید ثبت کنید.</li>
+                      <li>برای مشتری، حداقل یک آدرس اضافه کنید.</li>
+                      <li>برای مشتری، حداقل یک دستگاه اضافه کنید.</li>
+                      <li>از بخش درخواست‌های تعمیر، درخواست جدید بسازید.</li>
+                      <li>اگر پلن شما حرفه‌ای یا سازمانی است، تکنسین تعریف کنید.</li>
+                      <li>درخواست را به تکنسین ارجاع دهید.</li>
+                      <li>گزارش تعمیر ثبت کنید.</li>
+                      <li>فاکتور صادر کنید و صفحه چاپ را ببینید.</li>
+                    </ol>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/super-admin/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { logoutAction } from "@/app/auth/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          export default async function SuperAdminPage() {
+            await requireSuperAdminContext();
+
+            const [
+              tenantsCount,
+              usersCount,
+              licensesCount,
+              activeLicensesCount,
+              unusedLicensesCount,
+              modulesCount,
+              plansCount
+            ] = await Promise.all([
+              prisma.tenant.count(),
+              prisma.user.count(),
+              prisma.license.count(),
+              prisma.license.count({
+                where: {
+                  status: "ACTIVE"
+                }
+              }),
+              prisma.license.count({
+                where: {
+                  status: "UNUSED"
+                }
+              }),
+              prisma.module.count(),
+              prisma.plan.count()
+            ]);
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <span className="badge">Super Admin</span>
+                  <h1>پنل مدیر کل سرویسیار</h1>
+                  <p className="muted">
+                    این پنل برای مالک نرم‌افزار است. برای تست مشتریان، تعمیرات و تکنسین‌ها باید یک کسب‌وکار جداگانه از مسیر ثبت‌نام بسازید.
+                  </p>
+
+                  <div className="alert warning">
+                    اگر می‌خواهید بخش‌های عملیاتی مثل مشتریان، درخواست تعمیر و فاکتور را تست کنید، ابتدا از حساب مدیر کل خارج شوید و از مسیر ثبت‌نام، یک کسب‌وکار تستی با کد لایسنس حرفه‌ای بسازید.
+                  </div>
+
+                  <div className="hint-box">
+                    <strong>کدهای پیشنهادی برای تست کسب‌وکار:</strong>
+                    <code>SERVICYAR-PRO-001-DEMO</code>
+                    <code>SERVICYAR-PRO-002-DEMO</code>
+                    <code>SERVICYAR-ENTERPRISE-001-DEMO</code>
+                  </div>
+
+                  <div className="admin-nav">
+                    <Link href="/super-admin/tenants">کسب‌وکارها</Link>
+                    <Link href="/super-admin/licenses">لایسنس‌ها</Link>
+                    <Link href="/super-admin/licenses/new">ساخت لایسنس</Link>
+                    <Link href="/super-admin/plans">پلن‌ها</Link>
+                    <Link href="/super-admin/modules">ماژول‌ها</Link>
+                    <Link href="/auth/register">ثبت کسب‌وکار تستی</Link>
+                  </div>
+
+                  <form action={logoutAction}>
+                    <button className="button" type="submit">
+                      خروج
+                    </button>
+                  </form>
+                </section>
+
+                <section className="stats-grid">
+                  <div className="stat-card">
+                    <span>کسب‌وکارها</span>
+                    <strong>{tenantsCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>کاربران</span>
+                    <strong>{usersCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>کل لایسنس‌ها</span>
+                    <strong>{licensesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>لایسنس فعال</span>
+                    <strong>{activeLicensesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>لایسنس آماده فروش</span>
+                    <strong>{unusedLicensesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>ماژول‌ها</span>
+                    <strong>{modulesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>پلن‌ها</span>
+                    <strong>{plansCount}</strong>
+                  </div>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat >> src/app/globals.css <<'EOF'
+
+          /* Fix and guide pages */
+
+          .guide-list {
+            line-height: 2.2;
+            color: #374151;
+            font-weight: 700;
+          }
+
+          .guide-list li {
+            margin-bottom: 8px;
+          }
+
+          .module-admin-grid {
+            display: grid;
+            gap: 12px;
+          }
+
+          .module-admin-card {
+            display: flex;
+            justify-content: space-between;
+            gap: 14px;
+            align-items: center;
+            border: 1px solid #e5e7eb;
+            background: #f8fafc;
+            border-radius: 16px;
+            padding: 14px;
+          }
+
+          .module-admin-card p {
+            margin: 6px 0;
+            color: #64748b;
+            direction: ltr;
+            text-align: right;
+          }
+
+          .module-admin-card small {
+            color: #64748b;
+          }
+
+          @media (max-width: 820px) {
+            .module-admin-card {
+              flex-direction: column;
+              align-items: flex-start;
+            }
+          }
+          EOF
+
+          # Replace old subscription links where possible
+          python - <<'PY'
+          from pathlib import Path
+
+          files = list(Path("src/app").rglob("*.tsx"))
+
+          for path in files:
+              text = path.read_text()
+
+              text = text.replace(
+                  '<Link href="/auth/activate">اشتراک و لایسنس</Link>',
+                  '<Link href="/dashboard/subscription">اشتراک و ماژول‌ها</Link>'
+              )
+
+              text = text.replace(
+                  '<a href="#">فاکتورها</a>',
+                  '<Link href="/dashboard/invoices">فاکتورها</Link>'
+              )
+
+              path.write_text(text)
+          PY
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          set -e
+
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Fix dashboard module errors and add subscription guidance"
+            git push
+          fi
+
+      - name: Create ZIP file
+        shell: bash
+        run: |
+          zip -r servicyar-dashboard-fixes.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-dashboard-fixes
+          path: servicyar-dashboard-fixes.zip
