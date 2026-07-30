@@ -1,0 +1,1474 @@
+name: Add Super Admin Management
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate super admin management files
+        run: |
+          mkdir -p src/app/super-admin/tenants
+          mkdir -p 'src/app/super-admin/tenants/[tenantId]'
+          mkdir -p src/app/super-admin/licenses
+          mkdir -p src/app/super-admin/licenses/new
+          mkdir -p src/app/super-admin/plans
+          mkdir -p src/app/super-admin/modules
+          mkdir -p src/lib
+
+          cat > src/lib/super-admin-context.ts <<'EOF'
+          import { redirect } from "next/navigation";
+          import { getCurrentSession } from "@/lib/session";
+
+          export async function requireSuperAdminContext() {
+            const session = await getCurrentSession();
+
+            if (!session) {
+              redirect("/auth/login");
+            }
+
+            if (session.user.globalRole !== "SUPER_ADMIN") {
+              redirect("/dashboard");
+            }
+
+            return {
+              user: session.user
+            };
+          }
+          EOF
+
+          cat > src/app/super-admin/actions.ts <<'EOF'
+          "use server";
+
+          import { randomBytes } from "crypto";
+          import { redirect } from "next/navigation";
+          import type { LicenseStatus, TenantStatus } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          function cleanText(value: FormDataEntryValue | null) {
+            return String(value || "").trim();
+          }
+
+          function toInt(value: FormDataEntryValue | null, fallback: number) {
+            const parsed = Number(String(value || ""));
+
+            if (!Number.isFinite(parsed) || parsed < 0) {
+              return fallback;
+            }
+
+            return Math.floor(parsed);
+          }
+
+          function errorRedirect(path: string, message: string): never {
+            redirect(`${path}?error=${encodeURIComponent(message)}`);
+          }
+
+          function generateLicenseKey(planCode: string) {
+            const year = new Date().getFullYear();
+            const part1 = randomBytes(3).toString("hex").toUpperCase();
+            const part2 = randomBytes(3).toString("hex").toUpperCase();
+
+            return `SERVICYAR-${planCode.toUpperCase()}-${year}-${part1}-${part2}`;
+          }
+
+          const validLicenseStatuses: LicenseStatus[] = [
+            "UNUSED",
+            "ACTIVE",
+            "EXPIRED",
+            "SUSPENDED",
+            "CANCELLED"
+          ];
+
+          const validTenantStatuses: TenantStatus[] = [
+            "ACTIVE",
+            "SUSPENDED",
+            "EXPIRED"
+          ];
+
+          export async function createLicenseAction(formData: FormData) {
+            const context = await requireSuperAdminContext();
+
+            const planId = cleanText(formData.get("planId"));
+            const customLicenseKey = cleanText(formData.get("licenseKey")).toUpperCase();
+            const durationDays = toInt(formData.get("durationDays"), 365);
+            const maxUsersRaw = cleanText(formData.get("maxUsers"));
+            const maxTechniciansRaw = cleanText(formData.get("maxTechnicians"));
+            const maxMonthlyRequestsRaw = cleanText(formData.get("maxMonthlyRequests"));
+
+            if (!planId) {
+              errorRedirect("/super-admin/licenses/new", "انتخاب پلن الزامی است.");
+            }
+
+            const plan = await prisma.plan.findUnique({
+              where: {
+                id: planId
+              }
+            });
+
+            if (!plan) {
+              errorRedirect("/super-admin/licenses/new", "پلن انتخاب‌شده معتبر نیست.");
+            }
+
+            const licenseKey = customLicenseKey || generateLicenseKey(plan.code);
+
+            const existingLicense = await prisma.license.findUnique({
+              where: {
+                licenseKey
+              }
+            });
+
+            if (existingLicense) {
+              errorRedirect("/super-admin/licenses/new", "این کد لایسنس قبلاً ساخته شده است.");
+            }
+
+            const maxUsers = maxUsersRaw ? toInt(maxUsersRaw, plan.maxUsers) : plan.maxUsers;
+            const maxTechnicians = maxTechniciansRaw
+              ? toInt(maxTechniciansRaw, plan.maxTechnicians)
+              : plan.maxTechnicians;
+
+            const maxMonthlyRequests =
+              maxMonthlyRequestsRaw === ""
+                ? plan.maxMonthlyRequests
+                : toInt(maxMonthlyRequestsRaw, plan.maxMonthlyRequests || 0);
+
+            const license = await prisma.license.create({
+              data: {
+                licenseKey,
+                status: "UNUSED",
+                planId: plan.id,
+                durationDays,
+                maxUsers,
+                maxTechnicians,
+                maxMonthlyRequests
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                userId: context.user.id,
+                action: "super_admin.license.created",
+                entityType: "License",
+                entityId: license.id,
+                metadata: {
+                  licenseKey,
+                  planCode: plan.code
+                }
+              }
+            });
+
+            redirect(`/super-admin/licenses?success=${encodeURIComponent("لایسنس جدید ساخته شد.")}`);
+          }
+
+          export async function updateLicenseStatusAction(formData: FormData) {
+            const context = await requireSuperAdminContext();
+
+            const licenseId = cleanText(formData.get("licenseId"));
+            const statusRaw = cleanText(formData.get("status")) as LicenseStatus;
+
+            if (!licenseId || !validLicenseStatuses.includes(statusRaw)) {
+              errorRedirect("/super-admin/licenses", "وضعیت لایسنس معتبر نیست.");
+            }
+
+            const license = await prisma.license.findUnique({
+              where: {
+                id: licenseId
+              }
+            });
+
+            if (!license) {
+              errorRedirect("/super-admin/licenses", "لایسنس پیدا نشد.");
+            }
+
+            await prisma.license.update({
+              where: {
+                id: licenseId
+              },
+              data: {
+                status: statusRaw
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                userId: context.user.id,
+                tenantId: license.tenantId,
+                action: "super_admin.license.status_updated",
+                entityType: "License",
+                entityId: licenseId,
+                metadata: {
+                  from: license.status,
+                  to: statusRaw
+                }
+              }
+            });
+
+            redirect(`/super-admin/licenses?success=${encodeURIComponent("وضعیت لایسنس به‌روزرسانی شد.")}`);
+          }
+
+          export async function updateTenantStatusAction(formData: FormData) {
+            const context = await requireSuperAdminContext();
+
+            const tenantId = cleanText(formData.get("tenantId"));
+            const statusRaw = cleanText(formData.get("status")) as TenantStatus;
+
+            if (!tenantId || !validTenantStatuses.includes(statusRaw)) {
+              errorRedirect("/super-admin/tenants", "وضعیت کسب‌وکار معتبر نیست.");
+            }
+
+            const tenant = await prisma.tenant.findUnique({
+              where: {
+                id: tenantId
+              }
+            });
+
+            if (!tenant) {
+              errorRedirect("/super-admin/tenants", "کسب‌وکار پیدا نشد.");
+            }
+
+            await prisma.tenant.update({
+              where: {
+                id: tenantId
+              },
+              data: {
+                status: statusRaw
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                userId: context.user.id,
+                tenantId,
+                action: "super_admin.tenant.status_updated",
+                entityType: "Tenant",
+                entityId: tenantId,
+                metadata: {
+                  from: tenant.status,
+                  to: statusRaw
+                }
+              }
+            });
+
+            redirect(`/super-admin/tenants/${tenantId}?success=${encodeURIComponent("وضعیت کسب‌وکار ذخیره شد.")}`);
+          }
+
+          export async function toggleTenantModuleAction(formData: FormData) {
+            const context = await requireSuperAdminContext();
+
+            const tenantId = cleanText(formData.get("tenantId"));
+            const moduleId = cleanText(formData.get("moduleId"));
+            const isEnabled = cleanText(formData.get("isEnabled")) === "true";
+
+            if (!tenantId || !moduleId) {
+              errorRedirect("/super-admin/tenants", "اطلاعات ماژول معتبر نیست.");
+            }
+
+            const tenant = await prisma.tenant.findUnique({
+              where: {
+                id: tenantId
+              }
+            });
+
+            if (!tenant) {
+              errorRedirect("/super-admin/tenants", "کسب‌وکار پیدا نشد.");
+            }
+
+            await prisma.tenantModule.upsert({
+              where: {
+                tenantId_moduleId: {
+                  tenantId,
+                  moduleId
+                }
+              },
+              update: {
+                isEnabled
+              },
+              create: {
+                tenantId,
+                moduleId,
+                isEnabled
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                userId: context.user.id,
+                tenantId,
+                action: "super_admin.tenant_module.toggled",
+                entityType: "TenantModule",
+                metadata: {
+                  moduleId,
+                  isEnabled
+                }
+              }
+            });
+
+            redirect(`/super-admin/tenants/${tenantId}?success=${encodeURIComponent("وضعیت ماژول ذخیره شد.")}`);
+          }
+          EOF
+
+          cat > src/app/super-admin/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { logoutAction } from "@/app/auth/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          export default async function SuperAdminPage() {
+            await requireSuperAdminContext();
+
+            const [
+              tenantsCount,
+              usersCount,
+              licensesCount,
+              activeLicensesCount,
+              unusedLicensesCount,
+              modulesCount,
+              plansCount
+            ] = await Promise.all([
+              prisma.tenant.count(),
+              prisma.user.count(),
+              prisma.license.count(),
+              prisma.license.count({
+                where: {
+                  status: "ACTIVE"
+                }
+              }),
+              prisma.license.count({
+                where: {
+                  status: "UNUSED"
+                }
+              }),
+              prisma.module.count(),
+              prisma.plan.count()
+            ]);
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <span className="badge">Super Admin</span>
+                  <h1>پنل مدیر کل سرویسیار</h1>
+                  <p className="muted">
+                    از این بخش می‌توانید کسب‌وکارهای خریدار، لایسنس‌ها، پلن‌ها و ماژول‌های قابل فروش را مدیریت کنید.
+                  </p>
+
+                  <div className="admin-nav">
+                    <Link href="/super-admin/tenants">کسب‌وکارها</Link>
+                    <Link href="/super-admin/licenses">لایسنس‌ها</Link>
+                    <Link href="/super-admin/licenses/new">ساخت لایسنس</Link>
+                    <Link href="/super-admin/plans">پلن‌ها</Link>
+                    <Link href="/super-admin/modules">ماژول‌ها</Link>
+                  </div>
+
+                  <form action={logoutAction}>
+                    <button className="button" type="submit">
+                      خروج
+                    </button>
+                  </form>
+                </section>
+
+                <section className="stats-grid">
+                  <div className="stat-card">
+                    <span>کسب‌وکارها</span>
+                    <strong>{tenantsCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>کاربران</span>
+                    <strong>{usersCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>کل لایسنس‌ها</span>
+                    <strong>{licensesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>لایسنس فعال</span>
+                    <strong>{activeLicensesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>لایسنس آماده فروش</span>
+                    <strong>{unusedLicensesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>ماژول‌ها</span>
+                    <strong>{modulesCount}</strong>
+                  </div>
+
+                  <div className="stat-card">
+                    <span>پلن‌ها</span>
+                    <strong>{plansCount}</strong>
+                  </div>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/super-admin/licenses/page.tsx <<'EOF'
+          import Link from "next/link";
+          import type { LicenseStatus } from "@prisma/client";
+          import { updateLicenseStatusAction } from "@/app/super-admin/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          const statusLabels: Record<LicenseStatus, string> = {
+            UNUSED: "استفاده‌نشده",
+            ACTIVE: "فعال",
+            EXPIRED: "منقضی",
+            SUSPENDED: "تعلیق‌شده",
+            CANCELLED: "لغوشده"
+          };
+
+          const statusOptions: Array<{ value: LicenseStatus | ""; label: string }> = [
+            { value: "", label: "همه وضعیت‌ها" },
+            { value: "UNUSED", label: "استفاده‌نشده" },
+            { value: "ACTIVE", label: "فعال" },
+            { value: "EXPIRED", label: "منقضی" },
+            { value: "SUSPENDED", label: "تعلیق‌شده" },
+            { value: "CANCELLED", label: "لغوشده" }
+          ];
+
+          const validStatuses = statusOptions
+            .map((item) => item.value)
+            .filter(Boolean) as LicenseStatus[];
+
+          export default async function SuperAdminLicensesPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ q?: string; status?: string; error?: string; success?: string }>;
+          }) {
+            await requireSuperAdminContext();
+
+            const params = await searchParams;
+            const q = String(params?.q || "").trim();
+            const statusRaw = String(params?.status || "").trim() as LicenseStatus;
+            const status = validStatuses.includes(statusRaw) ? statusRaw : undefined;
+
+            const licenses = await prisma.license.findMany({
+              where: {
+                ...(status ? { status } : {}),
+                ...(q
+                  ? {
+                      OR: [
+                        {
+                          licenseKey: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          tenant: {
+                            name: {
+                              contains: q,
+                              mode: "insensitive"
+                            }
+                          }
+                        },
+                        {
+                          plan: {
+                            nameFa: {
+                              contains: q,
+                              mode: "insensitive"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  : {})
+              },
+              include: {
+                plan: true,
+                tenant: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              },
+              take: 200
+            });
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <div className="page-header">
+                    <div>
+                      <span className="badge">مدیریت لایسنس‌ها</span>
+                      <h1>لایسنس‌ها و کدهای فعال‌سازی</h1>
+                      <p className="muted">
+                        این کدها را می‌توانید به تعمیرکاران بفروشید تا پلن و ماژول‌هایشان فعال شود.
+                      </p>
+                    </div>
+
+                    <div className="header-actions">
+                      <Link className="ghost-light-button" href="/super-admin">
+                        بازگشت
+                      </Link>
+                      <Link className="button" href="/super-admin/licenses/new">
+                        ساخت لایسنس جدید
+                      </Link>
+                    </div>
+                  </div>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+                  {params?.success ? <div className="alert success">{params.success}</div> : null}
+
+                  <form className="search-form service-search">
+                    <input
+                      name="q"
+                      defaultValue={q}
+                      placeholder="جستجو با کد لایسنس، نام کسب‌وکار یا پلن"
+                    />
+
+                    <select name="status" defaultValue={status || ""}>
+                      {statusOptions.map((item) => (
+                        <option key={item.value || "all"} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <button className="button compact" type="submit">
+                      جستجو
+                    </button>
+
+                    {(q || status) ? (
+                      <Link className="secondary-link" href="/super-admin/licenses">
+                        حذف فیلتر
+                      </Link>
+                    ) : null}
+                  </form>
+                </section>
+
+                <section className="panel">
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>کد لایسنس</th>
+                          <th>پلن</th>
+                          <th>وضعیت</th>
+                          <th>کسب‌وکار</th>
+                          <th>محدودیت‌ها</th>
+                          <th>اعتبار</th>
+                          <th>تغییر وضعیت</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {licenses.map((license) => (
+                          <tr key={license.id}>
+                            <td>
+                              <code>{license.licenseKey}</code>
+                            </td>
+                            <td>{license.plan.nameFa}</td>
+                            <td>{statusLabels[license.status]}</td>
+                            <td>
+                              {license.tenant ? (
+                                <Link href={`/super-admin/tenants/${license.tenant.id}`}>
+                                  {license.tenant.name}
+                                </Link>
+                              ) : (
+                                "هنوز فعال نشده"
+                              )}
+                            </td>
+                            <td>
+                              کاربر: {license.maxUsers} / تکنسین: {license.maxTechnicians}
+                              <br />
+                              درخواست ماهانه: {license.maxMonthlyRequests ?? "نامحدود"}
+                            </td>
+                            <td>
+                              {license.expiresAt
+                                ? license.expiresAt.toLocaleDateString("fa-IR")
+                                : `${license.durationDays} روز پس از فعال‌سازی`}
+                            </td>
+                            <td>
+                              <form action={updateLicenseStatusAction} className="inline-form">
+                                <input type="hidden" name="licenseId" value={license.id} />
+                                <select name="status" defaultValue={license.status}>
+                                  <option value="UNUSED">استفاده‌نشده</option>
+                                  <option value="ACTIVE">فعال</option>
+                                  <option value="EXPIRED">منقضی</option>
+                                  <option value="SUSPENDED">تعلیق‌شده</option>
+                                  <option value="CANCELLED">لغوشده</option>
+                                </select>
+                                <button className="table-action" type="submit">
+                                  ذخیره
+                                </button>
+                              </form>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/super-admin/licenses/new/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { createLicenseAction } from "@/app/super-admin/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          export default async function NewLicensePage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ error?: string }>;
+          }) {
+            await requireSuperAdminContext();
+
+            const params = await searchParams;
+
+            const plans = await prisma.plan.findMany({
+              where: {
+                isActive: true
+              },
+              orderBy: {
+                priceYearly: "asc"
+              }
+            });
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <div className="page-header">
+                    <div>
+                      <span className="badge">ساخت لایسنس</span>
+                      <h1>ایجاد کد فعال‌سازی جدید</h1>
+                      <p className="muted">
+                        این کد را بعد از فروش به تعمیرکار می‌دهید تا هنگام ثبت‌نام یا تمدید وارد کند.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/super-admin/licenses">
+                      بازگشت
+                    </Link>
+                  </div>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+
+                  <form action={createLicenseAction} className="form two-column">
+                    <label>
+                      پلن
+                      <select name="planId" required defaultValue="">
+                        <option value="" disabled>
+                          انتخاب پلن
+                        </option>
+                        {plans.map((plan) => (
+                          <option key={plan.id} value={plan.id}>
+                            {plan.nameFa} - {Number(plan.priceYearly || 0).toLocaleString("fa-IR")} تومان سالانه
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label>
+                      مدت اعتبار، روز
+                      <input name="durationDays" type="number" min="1" defaultValue="365" />
+                    </label>
+
+                    <label className="span-2">
+                      کد دلخواه، اختیاری
+                      <input
+                        name="licenseKey"
+                        placeholder="اگر خالی بماند، سیستم خودکار کد می‌سازد."
+                      />
+                    </label>
+
+                    <label>
+                      حداکثر کاربر، اختیاری
+                      <input name="maxUsers" type="number" min="1" placeholder="پیش‌فرض از پلن" />
+                    </label>
+
+                    <label>
+                      حداکثر تکنسین، اختیاری
+                      <input name="maxTechnicians" type="number" min="0" placeholder="پیش‌فرض از پلن" />
+                    </label>
+
+                    <label className="span-2">
+                      سقف درخواست ماهانه، اختیاری
+                      <input
+                        name="maxMonthlyRequests"
+                        type="number"
+                        min="0"
+                        placeholder="اگر خالی بماند، مقدار پلن استفاده می‌شود."
+                      />
+                    </label>
+
+                    <button className="button full span-2" type="submit">
+                      ساخت لایسنس
+                    </button>
+                  </form>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/super-admin/tenants/page.tsx <<'EOF'
+          import Link from "next/link";
+          import type { TenantStatus } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          const statusLabels: Record<TenantStatus, string> = {
+            ACTIVE: "فعال",
+            SUSPENDED: "تعلیق‌شده",
+            EXPIRED: "منقضی"
+          };
+
+          export default async function SuperAdminTenantsPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ q?: string; error?: string; success?: string }>;
+          }) {
+            await requireSuperAdminContext();
+
+            const params = await searchParams;
+            const q = String(params?.q || "").trim();
+
+            const tenants = await prisma.tenant.findMany({
+              where: {
+                ...(q
+                  ? {
+                      OR: [
+                        {
+                          name: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          mobile: {
+                            contains: q
+                          }
+                        },
+                        {
+                          city: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        }
+                      ]
+                    }
+                  : {})
+              },
+              include: {
+                owner: true,
+                licenses: {
+                  include: {
+                    plan: true
+                  },
+                  orderBy: {
+                    createdAt: "desc"
+                  },
+                  take: 1
+                },
+                _count: {
+                  select: {
+                    users: true,
+                    customers: true,
+                    serviceRequests: true,
+                    invoices: true
+                  }
+                }
+              },
+              orderBy: {
+                createdAt: "desc"
+              },
+              take: 200
+            });
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <div className="page-header">
+                    <div>
+                      <span className="badge">کسب‌وکارها</span>
+                      <h1>مشتریان نرم‌افزار سرویسیار</h1>
+                      <p className="muted">
+                        تعمیرکاران، شرکت‌ها و نمایندگی‌هایی که از سرویسیار استفاده می‌کنند.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/super-admin">
+                      بازگشت
+                    </Link>
+                  </div>
+
+                  <form className="search-form">
+                    <input
+                      name="q"
+                      defaultValue={q}
+                      placeholder="جستجو با نام کسب‌وکار، موبایل یا شهر"
+                    />
+                    <button className="button compact" type="submit">
+                      جستجو
+                    </button>
+                    {q ? (
+                      <Link className="secondary-link" href="/super-admin/tenants">
+                        حذف فیلتر
+                      </Link>
+                    ) : null}
+                  </form>
+                </section>
+
+                <section className="panel">
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>نام کسب‌وکار</th>
+                          <th>مالک</th>
+                          <th>شهر</th>
+                          <th>وضعیت</th>
+                          <th>پلن فعلی</th>
+                          <th>آمار</th>
+                          <th>عملیات</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {tenants.map((tenant) => {
+                          const latestLicense = tenant.licenses[0];
+
+                          return (
+                            <tr key={tenant.id}>
+                              <td>
+                                <strong>{tenant.name}</strong>
+                                <br />
+                                <small>{tenant.mobile || "موبایل ثبت نشده"}</small>
+                              </td>
+                              <td>
+                                {tenant.owner.name}
+                                <br />
+                                <small dir="ltr">{tenant.owner.mobile}</small>
+                              </td>
+                              <td>{tenant.city || "-"}</td>
+                              <td>{statusLabels[tenant.status]}</td>
+                              <td>
+                                {latestLicense ? (
+                                  <>
+                                    {latestLicense.plan.nameFa}
+                                    <br />
+                                    <small>{latestLicense.status}</small>
+                                  </>
+                                ) : (
+                                  "بدون لایسنس"
+                                )}
+                              </td>
+                              <td>
+                                کاربر: {tenant._count.users}
+                                <br />
+                                مشتری: {tenant._count.customers}
+                                <br />
+                                درخواست: {tenant._count.serviceRequests}
+                                <br />
+                                فاکتور: {tenant._count.invoices}
+                              </td>
+                              <td>
+                                <Link
+                                  className="table-action"
+                                  href={`/super-admin/tenants/${tenant.id}`}
+                                >
+                                  مدیریت
+                                </Link>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/super-admin/tenants/[tenantId]/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound } from "next/navigation";
+          import {
+            toggleTenantModuleAction,
+            updateTenantStatusAction
+          } from "@/app/super-admin/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          const tenantStatusLabels = {
+            ACTIVE: "فعال",
+            SUSPENDED: "تعلیق‌شده",
+            EXPIRED: "منقضی"
+          } as const;
+
+          const licenseStatusLabels = {
+            UNUSED: "استفاده‌نشده",
+            ACTIVE: "فعال",
+            EXPIRED: "منقضی",
+            SUSPENDED: "تعلیق‌شده",
+            CANCELLED: "لغوشده"
+          } as const;
+
+          export default async function TenantDetailsPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ tenantId: string }>;
+            searchParams?: Promise<{ error?: string; success?: string }>;
+          }) {
+            await requireSuperAdminContext();
+
+            const { tenantId } = await params;
+            const query = await searchParams;
+
+            const [tenant, allModules] = await Promise.all([
+              prisma.tenant.findUnique({
+                where: {
+                  id: tenantId
+                },
+                include: {
+                  owner: true,
+                  users: {
+                    include: {
+                      user: true
+                    }
+                  },
+                  licenses: {
+                    include: {
+                      plan: true
+                    },
+                    orderBy: {
+                      createdAt: "desc"
+                    }
+                  },
+                  tenantModules: {
+                    include: {
+                      module: true
+                    }
+                  },
+                  _count: {
+                    select: {
+                      customers: true,
+                      serviceRequests: true,
+                      invoices: true
+                    }
+                  }
+                }
+              }),
+              prisma.module.findMany({
+                orderBy: {
+                  code: "asc"
+                }
+              })
+            ]);
+
+            if (!tenant) {
+              notFound();
+            }
+
+            const enabledModuleMap = new Map(
+              tenant.tenantModules.map((item) => [item.moduleId, item.isEnabled])
+            );
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <div className="page-header">
+                    <div>
+                      <span className="badge">مدیریت کسب‌وکار</span>
+                      <h1>{tenant.name}</h1>
+                      <p className="muted">
+                        مالک: {tenant.owner.name} - <span dir="ltr">{tenant.owner.mobile}</span>
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/super-admin/tenants">
+                      بازگشت
+                    </Link>
+                  </div>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+                  {query?.success ? <div className="alert success">{query.success}</div> : null}
+                </section>
+
+                <section className="stats-grid">
+                  <div className="stat-card small">
+                    <span>وضعیت</span>
+                    <strong className="stat-text">{tenantStatusLabels[tenant.status]}</strong>
+                  </div>
+
+                  <div className="stat-card small">
+                    <span>مشتریان</span>
+                    <strong>{tenant._count.customers}</strong>
+                  </div>
+
+                  <div className="stat-card small">
+                    <span>درخواست‌ها</span>
+                    <strong>{tenant._count.serviceRequests}</strong>
+                  </div>
+
+                  <div className="stat-card small">
+                    <span>فاکتورها</span>
+                    <strong>{tenant._count.invoices}</strong>
+                  </div>
+                </section>
+
+                <section className="dashboard-grid">
+                  <div className="panel">
+                    <h3>وضعیت کسب‌وکار</h3>
+
+                    <form action={updateTenantStatusAction} className="form">
+                      <input type="hidden" name="tenantId" value={tenant.id} />
+
+                      <label>
+                        وضعیت
+                        <select name="status" defaultValue={tenant.status}>
+                          <option value="ACTIVE">فعال</option>
+                          <option value="SUSPENDED">تعلیق‌شده</option>
+                          <option value="EXPIRED">منقضی</option>
+                        </select>
+                      </label>
+
+                      <button className="button full" type="submit">
+                        ذخیره وضعیت
+                      </button>
+                    </form>
+                  </div>
+
+                  <div className="panel">
+                    <h3>اطلاعات کسب‌وکار</h3>
+
+                    <div className="info-list">
+                      <p>
+                        <strong>نام:</strong> {tenant.name}
+                      </p>
+                      <p>
+                        <strong>شناسه:</strong> {tenant.slug}
+                      </p>
+                      <p>
+                        <strong>موبایل:</strong> {tenant.mobile || "-"}
+                      </p>
+                      <p>
+                        <strong>شهر:</strong> {tenant.city || "-"}
+                      </p>
+                      <p>
+                        <strong>تاریخ ثبت:</strong> {tenant.createdAt.toLocaleDateString("fa-IR")}
+                      </p>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="panel">
+                  <h3>لایسنس‌های این کسب‌وکار</h3>
+
+                  {tenant.licenses.length === 0 ? (
+                    <p className="muted">هنوز لایسنسی برای این کسب‌وکار ثبت نشده است.</p>
+                  ) : (
+                    <div className="table-wrapper">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>کد</th>
+                            <th>پلن</th>
+                            <th>وضعیت</th>
+                            <th>شروع</th>
+                            <th>پایان</th>
+                            <th>محدودیت‌ها</th>
+                          </tr>
+                        </thead>
+
+                        <tbody>
+                          {tenant.licenses.map((license) => (
+                            <tr key={license.id}>
+                              <td>
+                                <code>{license.licenseKey}</code>
+                              </td>
+                              <td>{license.plan.nameFa}</td>
+                              <td>{licenseStatusLabels[license.status]}</td>
+                              <td>
+                                {license.startsAt
+                                  ? license.startsAt.toLocaleDateString("fa-IR")
+                                  : "-"}
+                              </td>
+                              <td>
+                                {license.expiresAt
+                                  ? license.expiresAt.toLocaleDateString("fa-IR")
+                                  : "-"}
+                              </td>
+                              <td>
+                                کاربر: {license.maxUsers} / تکنسین: {license.maxTechnicians}
+                                <br />
+                                درخواست ماهانه: {license.maxMonthlyRequests ?? "نامحدود"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+
+                <section className="panel">
+                  <h3>ماژول‌های فعال کسب‌وکار</h3>
+                  <p className="muted">
+                    از این بخش می‌توانید ماژول‌های خریداری‌شده یا افزونه‌های خاص هر کسب‌وکار را کنترل کنید.
+                  </p>
+
+                  <div className="module-admin-grid">
+                    {allModules.map((module) => {
+                      const isEnabled = enabledModuleMap.get(module.id) || false;
+
+                      return (
+                        <article className="module-admin-card" key={module.id}>
+                          <div>
+                            <strong>{module.nameFa}</strong>
+                            <p>{module.code}</p>
+                            <small>{module.description || ""}</small>
+                          </div>
+
+                          <form action={toggleTenantModuleAction}>
+                            <input type="hidden" name="tenantId" value={tenant.id} />
+                            <input type="hidden" name="moduleId" value={module.id} />
+                            <input
+                              type="hidden"
+                              name="isEnabled"
+                              value={isEnabled ? "false" : "true"}
+                            />
+
+                            <button
+                              className={isEnabled ? "table-action red" : "table-action green"}
+                              type="submit"
+                            >
+                              {isEnabled ? "غیرفعال کردن" : "فعال کردن"}
+                            </button>
+                          </form>
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="panel">
+                  <h3>کاربران این کسب‌وکار</h3>
+
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>نام</th>
+                          <th>موبایل</th>
+                          <th>نقش</th>
+                          <th>وضعیت</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {tenant.users.map((membership) => (
+                          <tr key={membership.id}>
+                            <td>{membership.user.name}</td>
+                            <td dir="ltr">{membership.user.mobile}</td>
+                            <td>{membership.role}</td>
+                            <td>{membership.isActive ? "فعال" : "غیرفعال"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/super-admin/plans/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          export default async function SuperAdminPlansPage() {
+            await requireSuperAdminContext();
+
+            const plans = await prisma.plan.findMany({
+              include: {
+                planModules: {
+                  include: {
+                    module: true
+                  }
+                },
+                _count: {
+                  select: {
+                    licenses: true
+                  }
+                }
+              },
+              orderBy: {
+                priceYearly: "asc"
+              }
+            });
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <div className="page-header">
+                    <div>
+                      <span className="badge">پلن‌ها</span>
+                      <h1>پلن‌های فروش سرویسیار</h1>
+                      <p className="muted">
+                        این پلن‌ها از Seed اولیه ساخته شده‌اند. در مرحله‌های بعد ویرایش پلن‌ها را هم اضافه می‌کنیم.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/super-admin">
+                      بازگشت
+                    </Link>
+                  </div>
+                </section>
+
+                <section className="pricing-grid">
+                  {plans.map((plan) => (
+                    <article className="pricing-card" key={plan.id}>
+                      <h3>{plan.nameFa}</h3>
+                      <p className="muted">{plan.description}</p>
+
+                      <div className="price">
+                        {Number(plan.priceYearly || 0).toLocaleString("fa-IR")}
+                        <span> تومان / سالانه</span>
+                      </div>
+
+                      <ul>
+                        <li>حداکثر کاربر: {plan.maxUsers}</li>
+                        <li>حداکثر تکنسین: {plan.maxTechnicians}</li>
+                        <li>درخواست ماهانه: {plan.maxMonthlyRequests ?? "نامحدود"}</li>
+                        <li>لایسنس‌های ساخته‌شده: {plan._count.licenses}</li>
+                      </ul>
+
+                      <div className="module-list">
+                        {plan.planModules.map((item) => (
+                          <span key={item.id}>{item.module.nameFa}</span>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/super-admin/modules/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { prisma } from "@/lib/prisma";
+          import { requireSuperAdminContext } from "@/lib/super-admin-context";
+
+          export default async function SuperAdminModulesPage() {
+            await requireSuperAdminContext();
+
+            const modules = await prisma.module.findMany({
+              include: {
+                _count: {
+                  select: {
+                    planModules: true,
+                    tenantModules: true
+                  }
+                }
+              },
+              orderBy: {
+                code: "asc"
+              }
+            });
+
+            return (
+              <main className="container">
+                <section className="card">
+                  <div className="page-header">
+                    <div>
+                      <span className="badge">ماژول‌ها</span>
+                      <h1>ماژول‌های قابل فروش</h1>
+                      <p className="muted">
+                        هر ماژول می‌تواند در پلن‌ها یا برای کسب‌وکارهای خاص فعال شود.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/super-admin">
+                      بازگشت
+                    </Link>
+                  </div>
+                </section>
+
+                <section className="panel">
+                  <div className="table-wrapper">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>کد</th>
+                          <th>نام فارسی</th>
+                          <th>توضیح</th>
+                          <th>وضعیت</th>
+                          <th>تعداد پلن</th>
+                          <th>تعداد کسب‌وکار</th>
+                        </tr>
+                      </thead>
+
+                      <tbody>
+                        {modules.map((module) => (
+                          <tr key={module.id}>
+                            <td>
+                              <code>{module.code}</code>
+                            </td>
+                            <td>{module.nameFa}</td>
+                            <td>{module.description || "-"}</td>
+                            <td>{module.isActive ? "فعال" : "غیرفعال"}</td>
+                            <td>{module._count.planModules}</td>
+                            <td>{module._count.tenantModules}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat >> src/app/globals.css <<'EOF'
+
+          /* Super admin management */
+
+          .admin-nav {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 20px 0;
+          }
+
+          .admin-nav a {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            background: #e0f2fe;
+            color: #0369a1;
+            padding: 10px 14px;
+            font-weight: 900;
+          }
+
+          .inline-form {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+          }
+
+          .table-action.red {
+            background: #fee2e2;
+            color: #991b1b;
+          }
+
+          .module-admin-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 14px;
+            margin-top: 18px;
+          }
+
+          .module-admin-card {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 14px;
+            border: 1px solid #e5e7eb;
+            background: #f8fafc;
+            border-radius: 16px;
+            padding: 16px;
+          }
+
+          .module-admin-card p {
+            margin: 6px 0;
+            color: #0369a1;
+            direction: ltr;
+            text-align: right;
+            font-weight: 800;
+          }
+
+          .module-admin-card small {
+            color: #64748b;
+            line-height: 1.8;
+          }
+
+          .pricing-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            margin-top: 24px;
+          }
+
+          .pricing-card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 22px;
+            padding: 22px;
+            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+          }
+
+          .pricing-card h3 {
+            margin-top: 0;
+          }
+
+          .pricing-card ul {
+            padding-right: 18px;
+            line-height: 2;
+            color: #374151;
+          }
+
+          .price {
+            margin: 18px 0;
+            font-size: 26px;
+            font-weight: 950;
+            color: #0f172a;
+          }
+
+          .price span {
+            font-size: 14px;
+            color: #64748b;
+            font-weight: 700;
+          }
+          EOF
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add super admin tenant, license, plan and module management"
+            git push
+          fi
+
+      - name: Create ZIP file
+        run: |
+          zip -r servicyar-super-admin-management.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-super-admin-management
+          path: servicyar-super-admin-management.zip
