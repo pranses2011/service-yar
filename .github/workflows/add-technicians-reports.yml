@@ -1,0 +1,1131 @@
+name: Add Technicians and Service Reports Module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate technicians and reports module files
+        run: |
+          mkdir -p src/app/dashboard/technicians
+          mkdir -p src/app/dashboard/technicians/new
+          mkdir -p 'src/app/dashboard/technicians/[technicianUserId]'
+          mkdir -p src/app/dashboard/service-reports
+          mkdir -p 'src/app/dashboard/service-requests/[requestId]/report'
+
+          cat > src/app/dashboard/technicians/actions.ts <<'EOF'
+          "use server";
+
+          import bcrypt from "bcryptjs";
+          import { redirect } from "next/navigation";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requirePermission } from "@/lib/permissions";
+          import { requireTenantContext } from "@/lib/tenant-context";
+          import { getTenantActiveLicense } from "@/lib/license";
+
+          function cleanText(value: FormDataEntryValue | null) {
+            return String(value || "").trim();
+          }
+
+          function errorRedirect(path: string, message: string): never {
+            redirect(`${path}?error=${encodeURIComponent(message)}`);
+          }
+
+          export async function createTechnicianAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "technicians");
+            requirePermission(context.role, "users.manage");
+
+            const name = cleanText(formData.get("name"));
+            const mobile = cleanText(formData.get("mobile"));
+            const emailRaw = cleanText(formData.get("email"));
+            const email = emailRaw || null;
+            const password = cleanText(formData.get("password"));
+
+            if (!name || !mobile || !password) {
+              errorRedirect("/dashboard/technicians/new", "نام، شماره موبایل و رمز عبور تکنسین الزامی است.");
+            }
+
+            if (password.length < 8) {
+              errorRedirect("/dashboard/technicians/new", "رمز عبور باید حداقل ۸ کاراکتر باشد.");
+            }
+
+            const activeLicense = await getTenantActiveLicense(context.tenantId);
+
+            if (!activeLicense) {
+              errorRedirect("/dashboard/technicians/new", "اشتراک فعال پیدا نشد.");
+            }
+
+            const currentTechniciansCount = await prisma.tenantUser.count({
+              where: {
+                tenantId: context.tenantId,
+                role: "TECHNICIAN",
+                isActive: true
+              }
+            });
+
+            if (currentTechniciansCount >= activeLicense.maxTechnicians) {
+              errorRedirect(
+                "/dashboard/technicians/new",
+                `سقف تعداد تکنسین در پلن فعلی شما ${activeLicense.maxTechnicians} نفر است.`
+              );
+            }
+
+            const passwordHash = await bcrypt.hash(password, 12);
+
+            let user = await prisma.user.findUnique({
+              where: {
+                mobile
+              }
+            });
+
+            if (!user) {
+              user = await prisma.user.create({
+                data: {
+                  name,
+                  mobile,
+                  email,
+                  passwordHash,
+                  globalRole: "USER",
+                  isActive: true
+                }
+              });
+            } else {
+              await prisma.user.update({
+                where: {
+                  id: user.id
+                },
+                data: {
+                  name,
+                  email,
+                  isActive: true
+                }
+              });
+            }
+
+            const existingMembership = await prisma.tenantUser.findUnique({
+              where: {
+                tenantId_userId: {
+                  tenantId: context.tenantId,
+                  userId: user.id
+                }
+              }
+            });
+
+            if (existingMembership) {
+              if (existingMembership.role === "TECHNICIAN") {
+                errorRedirect("/dashboard/technicians/new", "این تکنسین قبلاً برای این کسب‌وکار ثبت شده است.");
+              }
+
+              errorRedirect(
+                "/dashboard/technicians/new",
+                "این کاربر قبلاً با نقش دیگری در کسب‌وکار شما عضو شده است."
+              );
+            }
+
+            await prisma.tenantUser.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: user.id,
+                role: "TECHNICIAN",
+                isActive: true
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "technician.created",
+                entityType: "User",
+                entityId: user.id,
+                metadata: {
+                  mobile
+                }
+              }
+            });
+
+            redirect(`/dashboard/technicians/${user.id}`);
+          }
+
+          export async function updateTechnicianStatusAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "technicians");
+            requirePermission(context.role, "users.manage");
+
+            const technicianUserId = cleanText(formData.get("technicianUserId"));
+            const nextStatus = cleanText(formData.get("isActive"));
+
+            if (!technicianUserId) {
+              errorRedirect("/dashboard/technicians", "شناسه تکنسین معتبر نیست.");
+            }
+
+            const membership = await prisma.tenantUser.findFirst({
+              where: {
+                tenantId: context.tenantId,
+                userId: technicianUserId,
+                role: "TECHNICIAN"
+              }
+            });
+
+            if (!membership) {
+              errorRedirect("/dashboard/technicians", "تکنسین پیدا نشد.");
+            }
+
+            await prisma.tenantUser.update({
+              where: {
+                id: membership.id
+              },
+              data: {
+                isActive: nextStatus === "true"
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "technician.status_updated",
+                entityType: "User",
+                entityId: technicianUserId,
+                metadata: {
+                  isActive: nextStatus === "true"
+                }
+              }
+            });
+
+            redirect(
+              `/dashboard/technicians/${technicianUserId}?success=${encodeURIComponent(
+                "وضعیت تکنسین به‌روزرسانی شد."
+              )}`
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/service-reports/actions.ts <<'EOF'
+          "use server";
+
+          import { redirect } from "next/navigation";
+          import type { ServiceRequestStatus } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requirePermission } from "@/lib/permissions";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          function cleanText(value: FormDataEntryValue | null) {
+            return String(value || "").trim();
+          }
+
+          function errorRedirect(path: string, message: string): never {
+            redirect(`${path}?error=${encodeURIComponent(message)}`);
+          }
+
+          const allowedNextStatuses: ServiceRequestStatus[] = [
+            "IN_PROGRESS",
+            "WAITING_FOR_PART",
+            "COMPLETED"
+          ];
+
+          export async function createServiceReportAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "service_reports");
+            requirePermission(context.role, "service_reports.create");
+
+            const requestId = cleanText(formData.get("requestId"));
+            const diagnosis = cleanText(formData.get("diagnosis"));
+            const workDone = cleanText(formData.get("workDone"));
+            const partsUsedText = cleanText(formData.get("partsUsedText"));
+            const recommendations = cleanText(formData.get("recommendations"));
+            const nextStatusRaw = cleanText(formData.get("nextStatus")) as ServiceRequestStatus;
+
+            if (!requestId || !diagnosis || !workDone) {
+              errorRedirect(
+                `/dashboard/service-requests/${requestId}/report`,
+                "ایراد تشخیص داده‌شده و شرح کار انجام‌شده الزامی است."
+              );
+            }
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!request) {
+              errorRedirect("/dashboard/service-requests", "درخواست تعمیر پیدا نشد.");
+            }
+
+            if (
+              context.role === "TECHNICIAN" &&
+              request.assignedTechnicianUserId !== context.user.id
+            ) {
+              errorRedirect(
+                "/dashboard/service-requests",
+                "شما فقط برای درخواست‌های ارجاع‌شده به خودتان می‌توانید گزارش ثبت کنید."
+              );
+            }
+
+            const nextStatus = allowedNextStatuses.includes(nextStatusRaw)
+              ? nextStatusRaw
+              : request.status;
+
+            const report = await prisma.serviceReport.create({
+              data: {
+                tenantId: context.tenantId,
+                serviceRequestId: request.id,
+                technicianUserId:
+                  context.role === "TECHNICIAN"
+                    ? context.user.id
+                    : request.assignedTechnicianUserId || context.user.id,
+                diagnosis,
+                workDone,
+                partsUsedText: partsUsedText || null,
+                recommendations: recommendations || null
+              }
+            });
+
+            await prisma.serviceRequest.update({
+              where: {
+                id: request.id
+              },
+              data: {
+                status: nextStatus
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "service_report.created",
+                entityType: "ServiceReport",
+                entityId: report.id,
+                metadata: {
+                  serviceRequestId: request.id,
+                  nextStatus
+                }
+              }
+            });
+
+            redirect(
+              `/dashboard/service-requests/${request.id}?success=${encodeURIComponent(
+                "گزارش تعمیر ثبت شد."
+              )}`
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/technicians/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+          import { getTenantActiveLicense } from "@/lib/license";
+
+          export default async function TechniciansPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ q?: string; error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "technicians");
+
+            const params = await searchParams;
+            const q = String(params?.q || "").trim();
+
+            const [technicians, activeLicense] = await Promise.all([
+              prisma.tenantUser.findMany({
+                where: {
+                  tenantId: context.tenantId,
+                  role: "TECHNICIAN",
+                  ...(q
+                    ? {
+                        user: {
+                          OR: [
+                            {
+                              name: {
+                                contains: q,
+                                mode: "insensitive"
+                              }
+                            },
+                            {
+                              mobile: {
+                                contains: q
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    : {})
+                },
+                include: {
+                  user: {
+                    include: {
+                      assignedServiceRequests: {
+                        where: {
+                          tenantId: context.tenantId
+                        }
+                      },
+                      serviceReports: {
+                        where: {
+                          tenantId: context.tenantId
+                        }
+                      }
+                    }
+                  }
+                },
+                orderBy: {
+                  createdAt: "desc"
+                }
+              }),
+              getTenantActiveLicense(context.tenantId)
+            ]);
+
+            const activeTechniciansCount = technicians.filter((item) => item.isActive).length;
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <a href="#">فاکتورها</a>
+                      <Link href="/auth/activate">اشتراک و لایسنس</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">مدیریت تکنسین‌ها</span>
+                      <h1>تکنسین‌ها</h1>
+                      <p className="muted">
+                        تکنسین‌ها، درخواست‌های ارجاع‌شده و گزارش‌های تعمیر را مدیریت کنید.
+                      </p>
+                    </div>
+
+                    <Link className="button" href="/dashboard/technicians/new">
+                      + ثبت تکنسین جدید
+                    </Link>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+                  {params?.success ? <div className="alert success">{params.success}</div> : null}
+
+                  <section className="stats-grid">
+                    <div className="stat-card small">
+                      <span>تکنسین فعال</span>
+                      <strong>{activeTechniciansCount}</strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>سقف پلن</span>
+                      <strong>{activeLicense?.maxTechnicians ?? "-"}</strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>کل تکنسین‌ها</span>
+                      <strong>{technicians.length}</strong>
+                    </div>
+                  </section>
+
+                  <section className="panel">
+                    <form className="search-form">
+                      <input
+                        name="q"
+                        defaultValue={q}
+                        placeholder="جستجو با نام یا شماره موبایل تکنسین"
+                      />
+                      <button className="button compact" type="submit">
+                        جستجو
+                      </button>
+                      {q ? (
+                        <Link className="secondary-link" href="/dashboard/technicians">
+                          حذف فیلتر
+                        </Link>
+                      ) : null}
+                    </form>
+                  </section>
+
+                  <section className="panel">
+                    {technicians.length === 0 ? (
+                      <div className="empty-state">
+                        <h3>هنوز تکنسینی ثبت نشده است</h3>
+                        <p className="muted">
+                          برای ارجاع درخواست‌های تعمیر، ابتدا تکنسین‌ها را تعریف کنید.
+                        </p>
+                        <Link className="button" href="/dashboard/technicians/new">
+                          ثبت اولین تکنسین
+                        </Link>
+                      </div>
+                    ) : (
+                      <div className="table-wrapper">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>نام</th>
+                              <th>موبایل</th>
+                              <th>وضعیت</th>
+                              <th>درخواست‌ها</th>
+                              <th>گزارش‌ها</th>
+                              <th>تاریخ عضویت</th>
+                              <th>عملیات</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {technicians.map((technician) => (
+                              <tr key={technician.id}>
+                                <td>
+                                  <strong>{technician.user.name}</strong>
+                                </td>
+                                <td dir="ltr">{technician.user.mobile}</td>
+                                <td>
+                                  <span className={technician.isActive ? "active-pill" : "inactive-pill"}>
+                                    {technician.isActive ? "فعال" : "غیرفعال"}
+                                  </span>
+                                </td>
+                                <td>{technician.user.assignedServiceRequests.length}</td>
+                                <td>{technician.user.serviceReports.length}</td>
+                                <td>{technician.createdAt.toLocaleDateString("fa-IR")}</td>
+                                <td>
+                                  <Link
+                                    className="table-action"
+                                    href={`/dashboard/technicians/${technician.userId}`}
+                                  >
+                                    مشاهده
+                                  </Link>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/technicians/new/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { createTechnicianAction } from "@/app/dashboard/technicians/actions";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function NewTechnicianPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ error?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "technicians");
+
+            const params = await searchParams;
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">تکنسین جدید</span>
+                      <h1>ثبت تکنسین جدید</h1>
+                      <p className="muted">
+                        برای تکنسین حساب کاربری ساخته می‌شود تا بتواند وارد پنل شود و گزارش تعمیر ثبت کند.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/dashboard/technicians">
+                      بازگشت
+                    </Link>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+
+                  <section className="panel">
+                    <form action={createTechnicianAction} className="form two-column">
+                      <label>
+                        نام تکنسین
+                        <input name="name" placeholder="مثلاً رضا محمدی" required />
+                      </label>
+
+                      <label>
+                        شماره موبایل
+                        <input name="mobile" placeholder="09120000000" required />
+                      </label>
+
+                      <label>
+                        ایمیل، اختیاری
+                        <input name="email" type="email" placeholder="technician@example.com" />
+                      </label>
+
+                      <label>
+                        رمز عبور
+                        <input name="password" type="password" placeholder="حداقل ۸ کاراکتر" required />
+                      </label>
+
+                      <button className="button full span-2" type="submit">
+                        ثبت تکنسین
+                      </button>
+                    </form>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/technicians/[technicianUserId]/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound } from "next/navigation";
+          import { updateTechnicianStatusAction } from "@/app/dashboard/technicians/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          const statusLabels = {
+            NEW: "جدید",
+            PENDING_CALL: "در انتظار تماس",
+            ASSIGNED: "ارجاع‌شده",
+            IN_PROGRESS: "در حال انجام",
+            WAITING_FOR_PART: "در انتظار قطعه",
+            COMPLETED: "تکمیل‌شده",
+            CANCELLED: "لغوشده"
+          } as const;
+
+          export default async function TechnicianDetailsPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ technicianUserId: string }>;
+            searchParams?: Promise<{ error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "technicians");
+
+            const { technicianUserId } = await params;
+            const query = await searchParams;
+
+            const technician = await prisma.tenantUser.findFirst({
+              where: {
+                tenantId: context.tenantId,
+                userId: technicianUserId,
+                role: "TECHNICIAN"
+              },
+              include: {
+                user: {
+                  include: {
+                    assignedServiceRequests: {
+                      where: {
+                        tenantId: context.tenantId
+                      },
+                      include: {
+                        customer: true,
+                        appliance: true
+                      },
+                      orderBy: {
+                        createdAt: "desc"
+                      }
+                    },
+                    serviceReports: {
+                      where: {
+                        tenantId: context.tenantId
+                      },
+                      include: {
+                        serviceRequest: {
+                          include: {
+                            customer: true,
+                            appliance: true
+                          }
+                        }
+                      },
+                      orderBy: {
+                        createdAt: "desc"
+                      },
+                      take: 20
+                    }
+                  }
+                }
+              }
+            });
+
+            if (!technician) {
+              notFound();
+            }
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">پرونده تکنسین</span>
+                      <h1>{technician.user.name}</h1>
+                      <p className="muted">
+                        موبایل: <span dir="ltr">{technician.user.mobile}</span>
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/dashboard/technicians">
+                      بازگشت به تکنسین‌ها
+                    </Link>
+                  </header>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+                  {query?.success ? <div className="alert success">{query.success}</div> : null}
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>اطلاعات تکنسین</h3>
+
+                      <div className="info-list">
+                        <p>
+                          <strong>نام:</strong> {technician.user.name}
+                        </p>
+                        <p>
+                          <strong>موبایل:</strong> <span dir="ltr">{technician.user.mobile}</span>
+                        </p>
+                        <p>
+                          <strong>ایمیل:</strong> {technician.user.email || "ثبت نشده"}
+                        </p>
+                        <p>
+                          <strong>وضعیت:</strong>{" "}
+                          {technician.isActive ? "فعال" : "غیرفعال"}
+                        </p>
+                      </div>
+
+                      <form action={updateTechnicianStatusAction} className="form">
+                        <input type="hidden" name="technicianUserId" value={technician.userId} />
+
+                        <label>
+                          وضعیت تکنسین
+                          <select name="isActive" defaultValue={technician.isActive ? "true" : "false"}>
+                            <option value="true">فعال</option>
+                            <option value="false">غیرفعال</option>
+                          </select>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ذخیره وضعیت
+                        </button>
+                      </form>
+                    </div>
+
+                    <div className="panel">
+                      <h3>آمار عملکرد</h3>
+
+                      <div className="stats-grid inner">
+                        <div className="stat-card small">
+                          <span>درخواست‌های ارجاع‌شده</span>
+                          <strong>{technician.user.assignedServiceRequests.length}</strong>
+                        </div>
+
+                        <div className="stat-card small">
+                          <span>گزارش‌های ثبت‌شده</span>
+                          <strong>{technician.user.serviceReports.length}</strong>
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="panel">
+                    <h3>درخواست‌های ارجاع‌شده</h3>
+
+                    {technician.user.assignedServiceRequests.length === 0 ? (
+                      <p className="muted">هنوز درخواستی به این تکنسین ارجاع نشده است.</p>
+                    ) : (
+                      <div className="table-wrapper">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>کد پیگیری</th>
+                              <th>مشتری</th>
+                              <th>دستگاه</th>
+                              <th>وضعیت</th>
+                              <th>تاریخ ثبت</th>
+                              <th>عملیات</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {technician.user.assignedServiceRequests.map((request) => (
+                              <tr key={request.id}>
+                                <td dir="ltr">
+                                  <strong>{request.trackingCode}</strong>
+                                </td>
+                                <td>
+                                  {request.customer.firstName} {request.customer.lastName || ""}
+                                  <br />
+                                  <small dir="ltr">{request.customer.mobile}</small>
+                                </td>
+                                <td>
+                                  {request.appliance.type}
+                                  <br />
+                                  <small>{request.appliance.brand || "برند نامشخص"}</small>
+                                </td>
+                                <td>{statusLabels[request.status]}</td>
+                                <td>{request.createdAt.toLocaleDateString("fa-IR")}</td>
+                                <td>
+                                  <div className="table-actions">
+                                    <Link
+                                      className="table-action"
+                                      href={`/dashboard/service-requests/${request.id}`}
+                                    >
+                                      مشاهده
+                                    </Link>
+                                    <Link
+                                      className="table-action green"
+                                      href={`/dashboard/service-requests/${request.id}/report`}
+                                    >
+                                      ثبت گزارش
+                                    </Link>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="panel">
+                    <h3>آخرین گزارش‌های تعمیر</h3>
+
+                    {technician.user.serviceReports.length === 0 ? (
+                      <p className="muted">هنوز گزارشی توسط این تکنسین ثبت نشده است.</p>
+                    ) : (
+                      <div className="stack-list">
+                        {technician.user.serviceReports.map((report) => (
+                          <article className="list-card" key={report.id}>
+                            <strong>{report.serviceRequest.trackingCode}</strong>
+                            <p>
+                              {report.serviceRequest.customer.firstName}{" "}
+                              {report.serviceRequest.customer.lastName || ""} -{" "}
+                              {report.serviceRequest.appliance.type}
+                            </p>
+                            <p>{report.diagnosis}</p>
+                            <small>{report.createdAt.toLocaleString("fa-IR")}</small>
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/service-requests/[requestId]/report/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound, redirect } from "next/navigation";
+          import { createServiceReportAction } from "@/app/dashboard/service-reports/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function NewServiceReportPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ requestId: string }>;
+            searchParams?: Promise<{ error?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "service_reports");
+
+            const { requestId } = await params;
+            const query = await searchParams;
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              },
+              include: {
+                customer: true,
+                appliance: true,
+                assignedTechnician: true
+              }
+            });
+
+            if (!request) {
+              notFound();
+            }
+
+            if (
+              context.role === "TECHNICIAN" &&
+              request.assignedTechnicianUserId !== context.user.id
+            ) {
+              redirect("/dashboard/service-requests");
+            }
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <Link href="/dashboard/technicians">تکنسین‌ها</Link>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">گزارش تعمیر</span>
+                      <h1>ثبت گزارش تعمیر</h1>
+                      <p className="muted">
+                        درخواست: <span dir="ltr">{request.trackingCode}</span> - مشتری:{" "}
+                        {request.customer.firstName} {request.customer.lastName || ""}
+                      </p>
+                    </div>
+
+                    <Link
+                      className="ghost-light-button"
+                      href={`/dashboard/service-requests/${request.id}`}
+                    >
+                      بازگشت به درخواست
+                    </Link>
+                  </header>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>خلاصه درخواست</h3>
+
+                      <div className="info-list">
+                        <p>
+                          <strong>کد پیگیری:</strong>{" "}
+                          <span dir="ltr">{request.trackingCode}</span>
+                        </p>
+                        <p>
+                          <strong>مشتری:</strong> {request.customer.firstName}{" "}
+                          {request.customer.lastName || ""}
+                        </p>
+                        <p>
+                          <strong>دستگاه:</strong> {request.appliance.type}
+                          {request.appliance.brand ? ` - ${request.appliance.brand}` : ""}
+                          {request.appliance.model ? ` - ${request.appliance.model}` : ""}
+                        </p>
+                        <p>
+                          <strong>شرح مشکل:</strong> {request.problemDescription}
+                        </p>
+                        <p>
+                          <strong>تکنسین ارجاع‌شده:</strong>{" "}
+                          {request.assignedTechnician?.name || "ثبت نشده"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="panel">
+                      <h3>فرم گزارش</h3>
+
+                      <form action={createServiceReportAction} className="form">
+                        <input type="hidden" name="requestId" value={request.id} />
+
+                        <label>
+                          ایراد تشخیص داده‌شده
+                          <textarea
+                            name="diagnosis"
+                            placeholder="مثلاً خرابی پمپ تخلیه، ایراد برد، نشتی شلنگ..."
+                            required
+                          ></textarea>
+                        </label>
+
+                        <label>
+                          کار انجام‌شده
+                          <textarea
+                            name="workDone"
+                            placeholder="شرح دقیق کار انجام‌شده توسط تکنسین"
+                            required
+                          ></textarea>
+                        </label>
+
+                        <label>
+                          قطعات مصرفی
+                          <textarea
+                            name="partsUsedText"
+                            placeholder="مثلاً پمپ تخلیه، تسمه، سنسور..."
+                          ></textarea>
+                        </label>
+
+                        <label>
+                          پیشنهاد یا توضیحات بعدی
+                          <textarea
+                            name="recommendations"
+                            placeholder="مثلاً نیاز به سرویس دوره‌ای، تعویض قطعه در آینده..."
+                          ></textarea>
+                        </label>
+
+                        <label>
+                          وضعیت بعد از ثبت گزارش
+                          <select name="nextStatus" defaultValue="COMPLETED">
+                            <option value="IN_PROGRESS">در حال انجام</option>
+                            <option value="WAITING_FOR_PART">در انتظار قطعه</option>
+                            <option value="COMPLETED">تکمیل‌شده</option>
+                          </select>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ثبت گزارش تعمیر
+                        </button>
+                      </form>
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat >> src/app/globals.css <<'EOF'
+
+          /* Technicians and service reports */
+
+          .active-pill,
+          .inactive-pill {
+            display: inline-flex;
+            border-radius: 999px;
+            padding: 7px 10px;
+            font-size: 13px;
+            font-weight: 900;
+          }
+
+          .active-pill {
+            background: #dcfce7;
+            color: #166534;
+          }
+
+          .inactive-pill {
+            background: #fee2e2;
+            color: #991b1b;
+          }
+
+          .table-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+          }
+
+          .table-action.green {
+            background: #dcfce7;
+            color: #166534;
+          }
+
+          .stats-grid.inner {
+            margin: 12px 0 0;
+          }
+          EOF
+
+          python - <<'PY'
+          from pathlib import Path
+
+          files = [
+              Path("src/app/dashboard/page.tsx"),
+              Path("src/app/dashboard/customers/page.tsx"),
+              Path("src/app/dashboard/customers/new/page.tsx"),
+              Path("src/app/dashboard/customers/[customerId]/page.tsx"),
+              Path("src/app/dashboard/service-requests/page.tsx"),
+              Path("src/app/dashboard/service-requests/new/page.tsx"),
+              Path("src/app/dashboard/service-requests/[requestId]/page.tsx"),
+          ]
+
+          for path in files:
+              if not path.exists():
+                  continue
+
+              text = path.read_text()
+
+              text = text.replace(
+                  '<a href="#">تکنسین‌ها</a>',
+                  '<Link href="/dashboard/technicians">تکنسین‌ها</Link>'
+              )
+
+              path.write_text(text)
+          PY
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add technicians and service reports module"
+            git push
+          fi
+
+      - name: Create ZIP file
+        run: |
+          zip -r servicyar-technicians-reports.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-technicians-reports
+          path: servicyar-technicians-reports.zip
