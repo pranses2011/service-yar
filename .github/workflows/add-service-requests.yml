@@ -1,0 +1,1301 @@
+name: Add Service Requests Module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate service requests module files
+        run: |
+          mkdir -p src/app/dashboard/service-requests
+          mkdir -p src/app/dashboard/service-requests/new
+          mkdir -p 'src/app/dashboard/service-requests/[requestId]'
+
+          cat > src/app/dashboard/service-requests/actions.ts <<'EOF'
+          "use server";
+
+          import { redirect } from "next/navigation";
+          import type {
+            RequestPriority,
+            ServiceRequestStatus
+          } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requirePermission } from "@/lib/permissions";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          function cleanText(value: FormDataEntryValue | null) {
+            return String(value || "").trim();
+          }
+
+          function errorRedirect(path: string, message: string): never {
+            redirect(`${path}?error=${encodeURIComponent(message)}`);
+          }
+
+          function parseDateTimeLocal(value: string) {
+            if (!value) {
+              return null;
+            }
+
+            const date = new Date(value);
+
+            if (Number.isNaN(date.getTime())) {
+              return null;
+            }
+
+            return date;
+          }
+
+          async function generateTrackingCode(tenantId: string) {
+            const year = new Date().getFullYear();
+            const prefix = `SR-${year}`;
+
+            const count = await prisma.serviceRequest.count({
+              where: {
+                tenantId,
+                trackingCode: {
+                  startsWith: prefix
+                }
+              }
+            });
+
+            const number = String(count + 1).padStart(5, "0");
+
+            return `${prefix}-${number}`;
+          }
+
+          const validStatuses: ServiceRequestStatus[] = [
+            "NEW",
+            "PENDING_CALL",
+            "ASSIGNED",
+            "IN_PROGRESS",
+            "WAITING_FOR_PART",
+            "COMPLETED",
+            "CANCELLED"
+          ];
+
+          const validPriorities: RequestPriority[] = ["NORMAL", "URGENT"];
+
+          export async function createServiceRequestAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "service_requests");
+            requirePermission(context.role, "service_requests.create");
+
+            const customerId = cleanText(formData.get("customerId"));
+            const addressId = cleanText(formData.get("addressId"));
+            const applianceId = cleanText(formData.get("applianceId"));
+            const problemDescription = cleanText(formData.get("problemDescription"));
+            const priorityRaw = cleanText(formData.get("priority")) as RequestPriority;
+            const scheduledAtRaw = cleanText(formData.get("scheduledAt"));
+            const internalNotes = cleanText(formData.get("internalNotes"));
+
+            const priority: RequestPriority = validPriorities.includes(priorityRaw)
+              ? priorityRaw
+              : "NORMAL";
+
+            if (!customerId || !addressId || !applianceId || !problemDescription) {
+              errorRedirect(
+                "/dashboard/service-requests/new",
+                "مشتری، آدرس، دستگاه و شرح مشکل الزامی است."
+              );
+            }
+
+            const customer = await prisma.customer.findFirst({
+              where: {
+                id: customerId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!customer) {
+              errorRedirect("/dashboard/service-requests/new", "مشتری انتخاب‌شده معتبر نیست.");
+            }
+
+            const address = await prisma.customerAddress.findFirst({
+              where: {
+                id: addressId,
+                tenantId: context.tenantId,
+                customerId
+              }
+            });
+
+            if (!address) {
+              errorRedirect("/dashboard/service-requests/new", "آدرس انتخاب‌شده معتبر نیست.");
+            }
+
+            const appliance = await prisma.appliance.findFirst({
+              where: {
+                id: applianceId,
+                tenantId: context.tenantId,
+                customerId
+              }
+            });
+
+            if (!appliance) {
+              errorRedirect("/dashboard/service-requests/new", "دستگاه انتخاب‌شده معتبر نیست.");
+            }
+
+            const trackingCode = await generateTrackingCode(context.tenantId);
+
+            const request = await prisma.serviceRequest.create({
+              data: {
+                tenantId: context.tenantId,
+                customerId,
+                addressId,
+                applianceId,
+                createdByUserId: context.user.id,
+                trackingCode,
+                problemDescription,
+                priority,
+                scheduledAt: parseDateTimeLocal(scheduledAtRaw),
+                internalNotes: internalNotes || null,
+                status: "NEW"
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "service_request.created",
+                entityType: "ServiceRequest",
+                entityId: request.id,
+                metadata: {
+                  trackingCode
+                }
+              }
+            });
+
+            redirect(`/dashboard/service-requests/${request.id}`);
+          }
+
+          export async function updateServiceRequestAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "service_requests");
+            requirePermission(context.role, "service_requests.update");
+
+            const requestId = cleanText(formData.get("requestId"));
+            const problemDescription = cleanText(formData.get("problemDescription"));
+            const priorityRaw = cleanText(formData.get("priority")) as RequestPriority;
+            const scheduledAtRaw = cleanText(formData.get("scheduledAt"));
+            const internalNotes = cleanText(formData.get("internalNotes"));
+
+            const priority: RequestPriority = validPriorities.includes(priorityRaw)
+              ? priorityRaw
+              : "NORMAL";
+
+            if (!requestId || !problemDescription) {
+              errorRedirect(
+                `/dashboard/service-requests/${requestId}`,
+                "شناسه درخواست و شرح مشکل الزامی است."
+              );
+            }
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!request) {
+              errorRedirect("/dashboard/service-requests", "درخواست تعمیر پیدا نشد.");
+            }
+
+            await prisma.serviceRequest.update({
+              where: {
+                id: requestId
+              },
+              data: {
+                problemDescription,
+                priority,
+                scheduledAt: parseDateTimeLocal(scheduledAtRaw),
+                internalNotes: internalNotes || null
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "service_request.updated",
+                entityType: "ServiceRequest",
+                entityId: requestId
+              }
+            });
+
+            redirect(
+              `/dashboard/service-requests/${requestId}?success=${encodeURIComponent(
+                "اطلاعات درخواست ذخیره شد."
+              )}`
+            );
+          }
+
+          export async function updateServiceRequestStatusAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "service_requests");
+            requirePermission(context.role, "service_requests.update");
+
+            const requestId = cleanText(formData.get("requestId"));
+            const statusRaw = cleanText(formData.get("status")) as ServiceRequestStatus;
+
+            if (!requestId || !validStatuses.includes(statusRaw)) {
+              errorRedirect(
+                `/dashboard/service-requests/${requestId}`,
+                "وضعیت انتخاب‌شده معتبر نیست."
+              );
+            }
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!request) {
+              errorRedirect("/dashboard/service-requests", "درخواست تعمیر پیدا نشد.");
+            }
+
+            await prisma.serviceRequest.update({
+              where: {
+                id: requestId
+              },
+              data: {
+                status: statusRaw
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "service_request.status_updated",
+                entityType: "ServiceRequest",
+                entityId: requestId,
+                metadata: {
+                  from: request.status,
+                  to: statusRaw
+                }
+              }
+            });
+
+            redirect(
+              `/dashboard/service-requests/${requestId}?success=${encodeURIComponent(
+                "وضعیت درخواست تغییر کرد."
+              )}`
+            );
+          }
+
+          export async function assignTechnicianAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "service_requests");
+            requirePermission(context.role, "service_requests.assign");
+
+            const requestId = cleanText(formData.get("requestId"));
+            const technicianUserId = cleanText(formData.get("technicianUserId"));
+
+            if (!requestId) {
+              errorRedirect("/dashboard/service-requests", "شناسه درخواست معتبر نیست.");
+            }
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!request) {
+              errorRedirect("/dashboard/service-requests", "درخواست تعمیر پیدا نشد.");
+            }
+
+            if (!technicianUserId) {
+              await prisma.serviceRequest.update({
+                where: {
+                  id: requestId
+                },
+                data: {
+                  assignedTechnicianUserId: null,
+                  status: "NEW"
+                }
+              });
+
+              redirect(
+                `/dashboard/service-requests/${requestId}?success=${encodeURIComponent(
+                  "ارجاع تکنسین حذف شد."
+                )}`
+              );
+            }
+
+            const technician = await prisma.tenantUser.findFirst({
+              where: {
+                tenantId: context.tenantId,
+                userId: technicianUserId,
+                role: "TECHNICIAN",
+                isActive: true
+              }
+            });
+
+            if (!technician) {
+              errorRedirect(
+                `/dashboard/service-requests/${requestId}`,
+                "تکنسین انتخاب‌شده معتبر نیست."
+              );
+            }
+
+            await prisma.serviceRequest.update({
+              where: {
+                id: requestId
+              },
+              data: {
+                assignedTechnicianUserId: technicianUserId,
+                status: request.status === "NEW" ? "ASSIGNED" : request.status
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "service_request.assigned",
+                entityType: "ServiceRequest",
+                entityId: requestId,
+                metadata: {
+                  technicianUserId
+                }
+              }
+            });
+
+            redirect(
+              `/dashboard/service-requests/${requestId}?success=${encodeURIComponent(
+                "درخواست به تکنسین ارجاع شد."
+              )}`
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/service-requests/page.tsx <<'EOF'
+          import Link from "next/link";
+          import type { ServiceRequestStatus } from "@prisma/client";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          const statusLabels: Record<ServiceRequestStatus, string> = {
+            NEW: "جدید",
+            PENDING_CALL: "در انتظار تماس",
+            ASSIGNED: "ارجاع‌شده",
+            IN_PROGRESS: "در حال انجام",
+            WAITING_FOR_PART: "در انتظار قطعه",
+            COMPLETED: "تکمیل‌شده",
+            CANCELLED: "لغوشده"
+          };
+
+          const statusOptions: Array<{
+            value: ServiceRequestStatus | "";
+            label: string;
+          }> = [
+            { value: "", label: "همه وضعیت‌ها" },
+            { value: "NEW", label: "جدید" },
+            { value: "PENDING_CALL", label: "در انتظار تماس" },
+            { value: "ASSIGNED", label: "ارجاع‌شده" },
+            { value: "IN_PROGRESS", label: "در حال انجام" },
+            { value: "WAITING_FOR_PART", label: "در انتظار قطعه" },
+            { value: "COMPLETED", label: "تکمیل‌شده" },
+            { value: "CANCELLED", label: "لغوشده" }
+          ];
+
+          const validStatuses = statusOptions
+            .map((item) => item.value)
+            .filter(Boolean) as ServiceRequestStatus[];
+
+          export default async function ServiceRequestsPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ q?: string; status?: string; error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "service_requests");
+
+            const params = await searchParams;
+            const q = String(params?.q || "").trim();
+            const statusRaw = String(params?.status || "").trim() as ServiceRequestStatus;
+            const status = validStatuses.includes(statusRaw) ? statusRaw : undefined;
+
+            const requests = await prisma.serviceRequest.findMany({
+              where: {
+                tenantId: context.tenantId,
+                ...(status ? { status } : {}),
+                ...(q
+                  ? {
+                      OR: [
+                        {
+                          trackingCode: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          problemDescription: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          customer: {
+                            OR: [
+                              {
+                                firstName: {
+                                  contains: q,
+                                  mode: "insensitive"
+                                }
+                              },
+                              {
+                                lastName: {
+                                  contains: q,
+                                  mode: "insensitive"
+                                }
+                              },
+                              {
+                                mobile: {
+                                  contains: q
+                                }
+                              }
+                            ]
+                          }
+                        }
+                      ]
+                    }
+                  : {})
+              },
+              include: {
+                customer: true,
+                appliance: true,
+                assignedTechnician: true,
+                invoice: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              },
+              take: 100
+            });
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <a href="#">تکنسین‌ها</a>
+                      <a href="#">فاکتورها</a>
+                      <Link href="/auth/activate">اشتراک و لایسنس</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">مدیریت تعمیرات</span>
+                      <h1>درخواست‌های تعمیر</h1>
+                      <p className="muted">
+                        همه درخواست‌های ثبت‌شده، وضعیت کار، مشتری، دستگاه و تکنسین را از این بخش مدیریت کنید.
+                      </p>
+                    </div>
+
+                    <Link className="button" href="/dashboard/service-requests/new">
+                      + ثبت درخواست جدید
+                    </Link>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+                  {params?.success ? <div className="alert success">{params.success}</div> : null}
+
+                  <section className="panel">
+                    <form className="search-form service-search">
+                      <input
+                        name="q"
+                        defaultValue={q}
+                        placeholder="جستجو با کد پیگیری، نام مشتری، موبایل یا شرح مشکل"
+                      />
+
+                      <select name="status" defaultValue={status || ""}>
+                        {statusOptions.map((item) => (
+                          <option key={item.value || "all"} value={item.value}>
+                            {item.label}
+                          </option>
+                        ))}
+                      </select>
+
+                      <button className="button compact" type="submit">
+                        جستجو
+                      </button>
+
+                      {(q || status) ? (
+                        <Link className="secondary-link" href="/dashboard/service-requests">
+                          حذف فیلتر
+                        </Link>
+                      ) : null}
+                    </form>
+                  </section>
+
+                  <section className="panel">
+                    {requests.length === 0 ? (
+                      <div className="empty-state">
+                        <h3>هنوز درخواست تعمیری ثبت نشده است</h3>
+                        <p className="muted">
+                          برای شروع، یک درخواست تعمیر برای مشتری ثبت کنید.
+                        </p>
+                        <Link className="button" href="/dashboard/service-requests/new">
+                          ثبت اولین درخواست
+                        </Link>
+                      </div>
+                    ) : (
+                      <div className="table-wrapper">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>کد پیگیری</th>
+                              <th>مشتری</th>
+                              <th>دستگاه</th>
+                              <th>وضعیت</th>
+                              <th>اولویت</th>
+                              <th>تکنسین</th>
+                              <th>زمان مراجعه</th>
+                              <th>عملیات</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {requests.map((request) => (
+                              <tr key={request.id}>
+                                <td dir="ltr">
+                                  <strong>{request.trackingCode}</strong>
+                                </td>
+                                <td>
+                                  {request.customer.firstName} {request.customer.lastName || ""}
+                                  <br />
+                                  <small dir="ltr">{request.customer.mobile}</small>
+                                </td>
+                                <td>
+                                  {request.appliance.type}
+                                  <br />
+                                  <small>{request.appliance.brand || "برند نامشخص"}</small>
+                                </td>
+                                <td>
+                                  <span className={`status-pill status-${request.status.toLowerCase()}`}>
+                                    {statusLabels[request.status]}
+                                  </span>
+                                </td>
+                                <td>{request.priority === "URGENT" ? "فوری" : "عادی"}</td>
+                                <td>{request.assignedTechnician?.name || "ارجاع نشده"}</td>
+                                <td>
+                                  {request.scheduledAt
+                                    ? request.scheduledAt.toLocaleString("fa-IR")
+                                    : "ثبت نشده"}
+                                </td>
+                                <td>
+                                  <Link
+                                    className="table-action"
+                                    href={`/dashboard/service-requests/${request.id}`}
+                                  >
+                                    مشاهده
+                                  </Link>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/service-requests/new/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { createServiceRequestAction } from "@/app/dashboard/service-requests/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function NewServiceRequestPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ error?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "service_requests");
+
+            const params = await searchParams;
+
+            const customers = await prisma.customer.findMany({
+              where: {
+                tenantId: context.tenantId
+              },
+              include: {
+                addresses: {
+                  orderBy: {
+                    createdAt: "desc"
+                  }
+                },
+                appliances: {
+                  orderBy: {
+                    createdAt: "desc"
+                  }
+                }
+              },
+              orderBy: {
+                createdAt: "desc"
+              },
+              take: 200
+            });
+
+            const hasUsableCustomer = customers.some(
+              (customer) => customer.addresses.length > 0 && customer.appliances.length > 0
+            );
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <a href="#">تکنسین‌ها</a>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">درخواست جدید</span>
+                      <h1>ثبت درخواست تعمیر</h1>
+                      <p className="muted">
+                        مشتری، آدرس، دستگاه و شرح مشکل را انتخاب کنید تا درخواست تعمیر ساخته شود.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/dashboard/service-requests">
+                      بازگشت
+                    </Link>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+
+                  {!hasUsableCustomer ? (
+                    <section className="panel">
+                      <div className="empty-state">
+                        <h3>برای ثبت درخواست، ابتدا مشتری کامل بسازید</h3>
+                        <p className="muted">
+                          هر درخواست تعمیر به مشتری، آدرس و دستگاه نیاز دارد. ابتدا مشتری را ثبت کنید و در پرونده او حداقل یک آدرس و یک دستگاه اضافه کنید.
+                        </p>
+                        <Link className="button" href="/dashboard/customers/new">
+                          ثبت مشتری جدید
+                        </Link>
+                      </div>
+                    </section>
+                  ) : (
+                    <section className="panel">
+                      <form action={createServiceRequestAction} className="form two-column">
+                        <label className="span-2">
+                          مشتری
+                          <select name="customerId" required defaultValue="">
+                            <option value="" disabled>
+                              انتخاب مشتری
+                            </option>
+                            {customers.map((customer) => (
+                              <option key={customer.id} value={customer.id}>
+                                {customer.firstName} {customer.lastName || ""} - {customer.mobile}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label>
+                          آدرس مشتری
+                          <select name="addressId" required defaultValue="">
+                            <option value="" disabled>
+                              انتخاب آدرس
+                            </option>
+                            {customers.flatMap((customer) =>
+                              customer.addresses.map((address) => (
+                                <option key={address.id} value={address.id}>
+                                  {customer.firstName} {customer.lastName || ""} - {address.city} - {address.address}
+                                </option>
+                              ))
+                            )}
+                          </select>
+                        </label>
+
+                        <label>
+                          دستگاه مشتری
+                          <select name="applianceId" required defaultValue="">
+                            <option value="" disabled>
+                              انتخاب دستگاه
+                            </option>
+                            {customers.flatMap((customer) =>
+                              customer.appliances.map((appliance) => (
+                                <option key={appliance.id} value={appliance.id}>
+                                  {customer.firstName} {customer.lastName || ""} - {appliance.type}
+                                  {appliance.brand ? ` - ${appliance.brand}` : ""}
+                                  {appliance.model ? ` - ${appliance.model}` : ""}
+                                </option>
+                              ))
+                            )}
+                          </select>
+                        </label>
+
+                        <label>
+                          اولویت
+                          <select name="priority" defaultValue="NORMAL">
+                            <option value="NORMAL">عادی</option>
+                            <option value="URGENT">فوری</option>
+                          </select>
+                        </label>
+
+                        <label>
+                          زمان مراجعه، اختیاری
+                          <input name="scheduledAt" type="datetime-local" />
+                        </label>
+
+                        <label className="span-2">
+                          شرح مشکل
+                          <textarea
+                            name="problemDescription"
+                            placeholder="مثلاً ماشین لباسشویی آب تخلیه نمی‌کند..."
+                            required
+                          ></textarea>
+                        </label>
+
+                        <label className="span-2">
+                          توضیحات داخلی
+                          <textarea
+                            name="internalNotes"
+                            placeholder="توضیحات فقط برای تیم شما نمایش داده می‌شود."
+                          ></textarea>
+                        </label>
+
+                        <button className="button full span-2" type="submit">
+                          ثبت درخواست تعمیر
+                        </button>
+                      </form>
+
+                      <div className="alert warning form-note">
+                        نکته: در نسخه بعد، انتخاب آدرس و دستگاه را هوشمندتر می‌کنیم تا با انتخاب مشتری، فقط آدرس‌ها و دستگاه‌های همان مشتری نمایش داده شود.
+                      </div>
+                    </section>
+                  )}
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/service-requests/[requestId]/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound } from "next/navigation";
+          import {
+            assignTechnicianAction,
+            updateServiceRequestAction,
+            updateServiceRequestStatusAction
+          } from "@/app/dashboard/service-requests/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+          import type { ServiceRequestStatus } from "@prisma/client";
+
+          const statusLabels: Record<ServiceRequestStatus, string> = {
+            NEW: "جدید",
+            PENDING_CALL: "در انتظار تماس",
+            ASSIGNED: "ارجاع‌شده",
+            IN_PROGRESS: "در حال انجام",
+            WAITING_FOR_PART: "در انتظار قطعه",
+            COMPLETED: "تکمیل‌شده",
+            CANCELLED: "لغوشده"
+          };
+
+          const statusOptions: Array<{
+            value: ServiceRequestStatus;
+            label: string;
+          }> = [
+            { value: "NEW", label: "جدید" },
+            { value: "PENDING_CALL", label: "در انتظار تماس" },
+            { value: "ASSIGNED", label: "ارجاع‌شده" },
+            { value: "IN_PROGRESS", label: "در حال انجام" },
+            { value: "WAITING_FOR_PART", label: "در انتظار قطعه" },
+            { value: "COMPLETED", label: "تکمیل‌شده" },
+            { value: "CANCELLED", label: "لغوشده" }
+          ];
+
+          function toDateTimeLocalValue(date: Date | null) {
+            if (!date) {
+              return "";
+            }
+
+            const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+            const localDate = new Date(date.getTime() - offsetMs);
+
+            return localDate.toISOString().slice(0, 16);
+          }
+
+          export default async function ServiceRequestDetailsPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ requestId: string }>;
+            searchParams?: Promise<{ error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "service_requests");
+
+            const { requestId } = await params;
+            const query = await searchParams;
+
+            const request = await prisma.serviceRequest.findFirst({
+              where: {
+                id: requestId,
+                tenantId: context.tenantId
+              },
+              include: {
+                customer: true,
+                address: true,
+                appliance: true,
+                assignedTechnician: true,
+                createdBy: true,
+                reports: {
+                  include: {
+                    technician: true
+                  },
+                  orderBy: {
+                    createdAt: "desc"
+                  }
+                },
+                invoice: {
+                  include: {
+                    items: true
+                  }
+                }
+              }
+            });
+
+            if (!request) {
+              notFound();
+            }
+
+            const technicians = await prisma.tenantUser.findMany({
+              where: {
+                tenantId: context.tenantId,
+                role: "TECHNICIAN",
+                isActive: true
+              },
+              include: {
+                user: true
+              },
+              orderBy: {
+                createdAt: "desc"
+              }
+            });
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
+                      <a href="#">تکنسین‌ها</a>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">پرونده درخواست</span>
+                      <h1 dir="ltr">{request.trackingCode}</h1>
+                      <p className="muted">
+                        مشتری: {request.customer.firstName} {request.customer.lastName || ""} -{" "}
+                        <span dir="ltr">{request.customer.mobile}</span>
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/dashboard/service-requests">
+                      بازگشت به درخواست‌ها
+                    </Link>
+                  </header>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+                  {query?.success ? <div className="alert success">{query.success}</div> : null}
+
+                  <section className="stats-grid">
+                    <div className="stat-card small">
+                      <span>وضعیت</span>
+                      <strong className="stat-text">{statusLabels[request.status]}</strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>اولویت</span>
+                      <strong className="stat-text">
+                        {request.priority === "URGENT" ? "فوری" : "عادی"}
+                      </strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>تکنسین</span>
+                      <strong className="stat-text">
+                        {request.assignedTechnician?.name || "ارجاع نشده"}
+                      </strong>
+                    </div>
+
+                    <div className="stat-card small">
+                      <span>زمان مراجعه</span>
+                      <strong className="stat-text">
+                        {request.scheduledAt
+                          ? request.scheduledAt.toLocaleString("fa-IR")
+                          : "ثبت نشده"}
+                      </strong>
+                    </div>
+                  </section>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>اطلاعات مشتری و دستگاه</h3>
+
+                      <div className="info-list">
+                        <p>
+                          <strong>مشتری:</strong>{" "}
+                          <Link href={`/dashboard/customers/${request.customer.id}`}>
+                            {request.customer.firstName} {request.customer.lastName || ""}
+                          </Link>
+                        </p>
+
+                        <p>
+                          <strong>موبایل:</strong>{" "}
+                          <span dir="ltr">{request.customer.mobile}</span>
+                        </p>
+
+                        <p>
+                          <strong>دستگاه:</strong> {request.appliance.type}
+                          {request.appliance.brand ? ` - ${request.appliance.brand}` : ""}
+                          {request.appliance.model ? ` - ${request.appliance.model}` : ""}
+                        </p>
+
+                        <p>
+                          <strong>آدرس:</strong> {request.address.city} - {request.address.address}
+                        </p>
+
+                        <p>
+                          <strong>ثبت‌کننده:</strong> {request.createdBy.name}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="panel">
+                      <h3>تغییر وضعیت</h3>
+
+                      <form action={updateServiceRequestStatusAction} className="form">
+                        <input type="hidden" name="requestId" value={request.id} />
+
+                        <label>
+                          وضعیت درخواست
+                          <select name="status" defaultValue={request.status}>
+                            {statusOptions.map((item) => (
+                              <option key={item.value} value={item.value}>
+                                {item.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ذخیره وضعیت
+                        </button>
+                      </form>
+                    </div>
+                  </section>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>ویرایش اطلاعات درخواست</h3>
+
+                      <form action={updateServiceRequestAction} className="form">
+                        <input type="hidden" name="requestId" value={request.id} />
+
+                        <label>
+                          اولویت
+                          <select name="priority" defaultValue={request.priority}>
+                            <option value="NORMAL">عادی</option>
+                            <option value="URGENT">فوری</option>
+                          </select>
+                        </label>
+
+                        <label>
+                          زمان مراجعه
+                          <input
+                            name="scheduledAt"
+                            type="datetime-local"
+                            defaultValue={toDateTimeLocalValue(request.scheduledAt)}
+                          />
+                        </label>
+
+                        <label>
+                          شرح مشکل
+                          <textarea
+                            name="problemDescription"
+                            defaultValue={request.problemDescription}
+                            required
+                          ></textarea>
+                        </label>
+
+                        <label>
+                          توضیحات داخلی
+                          <textarea
+                            name="internalNotes"
+                            defaultValue={request.internalNotes || ""}
+                          ></textarea>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ذخیره تغییرات
+                        </button>
+                      </form>
+                    </div>
+
+                    <div className="panel">
+                      <h3>ارجاع به تکنسین</h3>
+
+                      {technicians.length === 0 ? (
+                        <div className="alert warning">
+                          هنوز تکنسینی تعریف نشده است. در مرحله بعد ماژول مدیریت تکنسین‌ها را اضافه می‌کنیم.
+                        </div>
+                      ) : (
+                        <form action={assignTechnicianAction} className="form">
+                          <input type="hidden" name="requestId" value={request.id} />
+
+                          <label>
+                            تکنسین
+                            <select
+                              name="technicianUserId"
+                              defaultValue={request.assignedTechnicianUserId || ""}
+                            >
+                              <option value="">بدون تکنسین</option>
+                              {technicians.map((technician) => (
+                                <option key={technician.userId} value={technician.userId}>
+                                  {technician.user.name} - {technician.user.mobile}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+
+                          <button className="button full" type="submit">
+                            ارجاع درخواست
+                          </button>
+                        </form>
+                      )}
+                    </div>
+                  </section>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>گزارش‌های تعمیر</h3>
+
+                      {request.reports.length === 0 ? (
+                        <p className="muted">
+                          هنوز گزارشی برای این درخواست ثبت نشده است. این بخش در مرحله تکنسین‌ها کامل می‌شود.
+                        </p>
+                      ) : (
+                        <div className="stack-list">
+                          {request.reports.map((report) => (
+                            <article className="list-card" key={report.id}>
+                              <strong>{report.technician.name}</strong>
+                              <p>{report.diagnosis}</p>
+                              <p>{report.workDone}</p>
+                              <small>{report.createdAt.toLocaleString("fa-IR")}</small>
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="panel">
+                      <h3>فاکتور</h3>
+
+                      {request.invoice ? (
+                        <div className="info-list">
+                          <p>
+                            <strong>شماره فاکتور:</strong> {request.invoice.invoiceNumber}
+                          </p>
+                          <p>
+                            <strong>مبلغ کل:</strong>{" "}
+                            {Number(request.invoice.total).toLocaleString("fa-IR")} تومان
+                          </p>
+                          <p>
+                            <strong>وضعیت پرداخت:</strong> {request.invoice.paymentStatus}
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="muted">
+                          هنوز فاکتوری برای این درخواست صادر نشده است. ماژول فاکتور در مرحله بعدی تکمیل می‌شود.
+                        </p>
+                      )}
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat >> src/app/globals.css <<'EOF'
+
+          /* Service requests module */
+
+          .service-search {
+            grid-template-columns: 1fr 220px auto auto;
+          }
+
+          .status-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            padding: 7px 10px;
+            font-size: 13px;
+            font-weight: 900;
+            white-space: nowrap;
+          }
+
+          .status-new {
+            background: #dbeafe;
+            color: #1d4ed8;
+          }
+
+          .status-pending_call {
+            background: #fef3c7;
+            color: #92400e;
+          }
+
+          .status-assigned {
+            background: #ede9fe;
+            color: #6d28d9;
+          }
+
+          .status-in_progress {
+            background: #ffedd5;
+            color: #c2410c;
+          }
+
+          .status-waiting_for_part {
+            background: #fef9c3;
+            color: #854d0e;
+          }
+
+          .status-completed {
+            background: #dcfce7;
+            color: #166534;
+          }
+
+          .status-cancelled {
+            background: #fee2e2;
+            color: #991b1b;
+          }
+
+          .stat-card.small strong.stat-text {
+            font-size: 18px;
+            line-height: 1.8;
+          }
+
+          .form-note {
+            margin-top: 18px;
+            margin-bottom: 0;
+          }
+
+          @media (max-width: 820px) {
+            .service-search {
+              grid-template-columns: 1fr;
+            }
+          }
+          EOF
+
+          # Update dashboard and customer navigation links where possible
+          python - <<'PY'
+          from pathlib import Path
+
+          files = [
+              Path("src/app/dashboard/page.tsx"),
+              Path("src/app/dashboard/customers/page.tsx"),
+              Path("src/app/dashboard/customers/new/page.tsx"),
+              Path("src/app/dashboard/customers/[customerId]/page.tsx"),
+          ]
+
+          for path in files:
+              if not path.exists():
+                  continue
+
+              text = path.read_text()
+
+              text = text.replace(
+                  '<a href="#">درخواست‌های تعمیر</a>',
+                  '<Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>'
+              )
+
+              path.write_text(text)
+          PY
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add service requests module"
+            git push
+          fi
+
+      - name: Create ZIP file
+        run: |
+          zip -r servicyar-service-requests.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-service-requests
+          path: servicyar-service-requests.zip
