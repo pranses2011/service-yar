@@ -1,0 +1,512 @@
+name: Add Deployment Tools
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate deployment tools
+        run: |
+          mkdir -p src/app/api/health
+          mkdir -p .github/workflows
+          mkdir -p docs
+
+          cat > vercel.json <<'EOF'
+          {
+            "buildCommand": "prisma generate && next build",
+            "installCommand": "npm install",
+            "framework": "nextjs"
+          }
+          EOF
+
+          cat > src/app/api/health/route.ts <<'EOF'
+          import { NextResponse } from "next/server";
+
+          export async function GET() {
+            return NextResponse.json({
+              ok: true,
+              app: "servicyar",
+              message: "سرویسیار فعال است.",
+              timestamp: new Date().toISOString()
+            });
+          }
+          EOF
+
+          cat > .github/workflows/ci.yml <<'EOF'
+          name: CI Build Check
+
+          on:
+            workflow_dispatch:
+            push:
+              branches:
+                - main
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+
+              env:
+                DATABASE_URL: "postgresql://postgres:password@localhost:5432/servicyar?schema=public"
+                SEED_ADMIN_NAME: "مدیر کل سرویسیار"
+                SEED_ADMIN_MOBILE: "09120000000"
+                SEED_ADMIN_EMAIL: "admin@servicyar.local"
+                SEED_ADMIN_PASSWORD: "Admin@123456"
+
+              steps:
+                - name: Checkout repository
+                  uses: actions/checkout@v4
+
+                - name: Setup Node.js
+                  uses: actions/setup-node@v4
+                  with:
+                    node-version: 22
+
+                - name: Install dependencies
+                  run: npm install
+
+                - name: Generate Prisma Client
+                  run: npx prisma generate
+
+                - name: Build project
+                  run: npm run build
+          EOF
+
+          cat > .github/workflows/db-push-seed.yml <<'EOF'
+          name: Database Push and Seed
+
+          on:
+            workflow_dispatch:
+              inputs:
+                run_seed:
+                  description: "آیا Seed اولیه اجرا شود؟"
+                  required: true
+                  default: "yes"
+                  type: choice
+                  options:
+                    - "yes"
+                    - "no"
+
+          jobs:
+            db:
+              runs-on: ubuntu-latest
+
+              env:
+                DATABASE_URL: ${{ secrets.DATABASE_URL }}
+                SEED_ADMIN_NAME: ${{ secrets.SEED_ADMIN_NAME }}
+                SEED_ADMIN_MOBILE: ${{ secrets.SEED_ADMIN_MOBILE }}
+                SEED_ADMIN_EMAIL: ${{ secrets.SEED_ADMIN_EMAIL }}
+                SEED_ADMIN_PASSWORD: ${{ secrets.SEED_ADMIN_PASSWORD }}
+
+              steps:
+                - name: Checkout repository
+                  uses: actions/checkout@v4
+
+                - name: Setup Node.js
+                  uses: actions/setup-node@v4
+                  with:
+                    node-version: 22
+
+                - name: Install dependencies
+                  run: npm install
+
+                - name: Generate Prisma Client
+                  run: npx prisma generate
+
+                - name: Push Prisma schema to database
+                  run: npx prisma db push
+
+                - name: Seed database
+                  if: ${{ github.event.inputs.run_seed == 'yes' }}
+                  run: npm run db:seed
+          EOF
+
+          cat > docs/DEPLOYMENT.md <<'EOF'
+          # راهنمای Deploy آنلاین سرویسیار بدون کامپیوتر
+
+          این راهنما برای حالتی است که فقط موبایل و GitHub دارید.
+
+          ## مسیر پیشنهادی
+
+          برای اجرای آنلاین سرویسیار، این ترکیب ساده و مناسب است:
+
+          - GitHub برای نگهداری کد
+          - Supabase یا Neon برای PostgreSQL
+          - Vercel برای اجرای Next.js
+
+          ---
+
+          ## مرحله 1: ساخت دیتابیس PostgreSQL
+
+          یکی از این سرویس‌ها را انتخاب کنید:
+
+          - Supabase: https://supabase.com
+          - Neon: https://neon.tech
+
+          پیشنهاد ساده‌تر برای شروع: Supabase.
+
+          در Supabase:
+
+          1. ثبت‌نام کنید.
+          2. یک Project جدید بسازید.
+          3. رمز دیتابیس را ذخیره کنید.
+          4. از بخش Project Settings وارد Database شوید.
+          5. Connection String مربوط به PostgreSQL را بردارید.
+
+          نمونه Connection String:
+
+          ```text
+          postgresql://postgres.xxxxx:YOUR_PASSWORD@aws-0-region.pooler.supabase.com:6543/postgres?pgbouncer=true
+          ```
+
+          برای Prisma معمولاً بهتر است از Direct connection یا connection مناسب Prisma استفاده کنید.
+
+          ---
+
+          ## مرحله 2: ثبت Secretها در GitHub
+
+          داخل Repository سرویسیار:
+
+          ```text
+          Settings → Secrets and variables → Actions → New repository secret
+          ```
+
+          این Secretها را اضافه کنید:
+
+          ```text
+          DATABASE_URL
+          SEED_ADMIN_NAME
+          SEED_ADMIN_MOBILE
+          SEED_ADMIN_EMAIL
+          SEED_ADMIN_PASSWORD
+          ```
+
+          مقدارهای پیشنهادی:
+
+          ```text
+          SEED_ADMIN_NAME=مدیر کل سرویسیار
+          SEED_ADMIN_MOBILE=09120000000
+          SEED_ADMIN_EMAIL=admin@servicyar.local
+          SEED_ADMIN_PASSWORD=Admin@123456
+          ```
+
+          نکته مهم: رمز مدیر کل را بعداً حتماً تغییر دهید.
+
+          ---
+
+          ## مرحله 3: ساخت جدول‌ها و Seed دیتابیس
+
+          در GitHub:
+
+          ```text
+          Actions → Database Push and Seed → Run workflow
+          ```
+
+          مقدار `run_seed` را روی `yes` بگذارید.
+
+          این کار:
+
+          - جدول‌های دیتابیس را از روی Prisma schema می‌سازد.
+          - ماژول‌ها را اضافه می‌کند.
+          - پلن‌ها را اضافه می‌کند.
+          - لایسنس‌های دمو می‌سازد.
+          - کاربر Super Admin می‌سازد.
+
+          ---
+
+          ## مرحله 4: Deploy روی Vercel
+
+          در Vercel:
+
+          1. وارد https://vercel.com شوید.
+          2. با GitHub لاگین کنید.
+          3. گزینه Add New Project را بزنید.
+          4. Repository سرویسیار را انتخاب کنید.
+          5. Environment Variables را اضافه کنید:
+
+          ```text
+          DATABASE_URL
+          SEED_ADMIN_NAME
+          SEED_ADMIN_MOBILE
+          SEED_ADMIN_EMAIL
+          SEED_ADMIN_PASSWORD
+          ```
+
+          6. Deploy را بزنید.
+
+          ---
+
+          ## مرحله 5: تست سایت
+
+          بعد از Deploy، این مسیر را باز کنید:
+
+          ```text
+          https://YOUR_DOMAIN.vercel.app/api/health
+          ```
+
+          اگر جواب شبیه زیر دیدید، یعنی پروژه زنده است:
+
+          ```json
+          {
+            "ok": true,
+            "app": "servicyar"
+          }
+          ```
+
+          سپس وارد این مسیر شوید:
+
+          ```text
+          /auth/login
+          ```
+
+          اطلاعات مدیر کل پیش‌فرض:
+
+          ```text
+          موبایل: 09120000000
+          ایمیل: admin@servicyar.local
+          رمز: Admin@123456
+          ```
+
+          ---
+
+          ## کدهای تست لایسنس
+
+          اگر Seed اجرا شده باشد، این کدها ساخته می‌شوند:
+
+          ```text
+          SERVICYAR-BASIC-001-DEMO
+          SERVICYAR-BASIC-002-DEMO
+          SERVICYAR-BASIC-003-DEMO
+
+          SERVICYAR-PRO-001-DEMO
+          SERVICYAR-PRO-002-DEMO
+          SERVICYAR-PRO-003-DEMO
+
+          SERVICYAR-ENTERPRISE-001-DEMO
+          SERVICYAR-ENTERPRISE-002-DEMO
+          SERVICYAR-ENTERPRISE-003-DEMO
+          ```
+
+          ---
+
+          ## نکته امنیتی مهم
+
+          هیچ‌وقت مقدارهای زیر را داخل چت، README عمومی یا فایل‌های GitHub قرار ندهید:
+
+          - GitHub Token
+          - DATABASE_URL واقعی
+          - رمز دیتابیس
+          - رمز مدیر کل
+          - کلیدهای پیامک یا پرداخت
+          EOF
+
+          cat > docs/PRODUCT_ROADMAP.md <<'EOF'
+          # نقشه راه محصول سرویسیار
+
+          ## نسخه فعلی MVP
+
+          امکانات ساخته‌شده:
+
+          - ثبت‌نام و ورود
+          - ساخت کسب‌وکار
+          - فعال‌سازی لایسنس
+          - ماژول مشتریان
+          - آدرس‌های مشتری
+          - دستگاه‌های مشتری
+          - درخواست‌های تعمیر
+          - تکنسین‌ها
+          - گزارش تعمیر
+          - فاکتور
+          - چاپ فاکتور
+          - پنل مدیر کل
+          - مدیریت لایسنس‌ها
+          - مدیریت ماژول‌ها
+          - مدیریت کسب‌وکارهای خریدار
+
+          ## فاز بعدی پیشنهادی
+
+          1. تنظیمات کسب‌وکار
+          2. پروفایل و تغییر رمز
+          3. اصلاح UX فرم ثبت درخواست
+          4. گزارش‌های مدیریتی
+          5. گارانتی خدمات
+          6. پیامک
+          7. انبار قطعات
+          8. اتصال درگاه پرداخت
+          9. پنل مشتری نهایی
+          10. PWA موبایل
+          EOF
+
+          cat > docs/SECURITY_NOTES.md <<'EOF'
+          # نکات امنیتی سرویسیار
+
+          ## موارد انجام‌شده در MVP
+
+          - رمز کاربران با bcrypt هش می‌شود.
+          - داده‌های هر کسب‌وکار با tenantId جدا می‌شود.
+          - نقش‌های کاربران در سطح Tenant تعریف شده‌اند.
+          - ماژول‌ها بر اساس Tenant کنترل می‌شوند.
+          - عملیات مهم در AuditLog ثبت می‌شود.
+
+          ## مواردی که قبل از فروش جدی باید تکمیل شود
+
+          - استفاده از Session امن‌تر به جای Cookie ساده
+          - افزودن CSRF Protection در صورت نیاز
+          - Rate Limit روی فرم ورود
+          - ورود پیامکی یا OTP
+          - امکان تغییر رمز
+          - امکان بازیابی رمز
+          - محدودیت دسترسی دقیق‌تر برای تکنسین‌ها
+          - بررسی وضعیت Tenant و License در همه صفحات
+          - بکاپ منظم دیتابیس
+          - اتصال Sentry برای مانیتورینگ خطاها
+          EOF
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("package.json")
+          data = json.loads(path.read_text())
+
+          scripts = data.setdefault("scripts", {})
+          scripts["dev"] = scripts.get("dev", "next dev")
+          scripts["build"] = scripts.get("build", "next build")
+          scripts["start"] = scripts.get("start", "next start")
+          scripts["postinstall"] = "prisma generate"
+          scripts["prisma:generate"] = "prisma generate"
+          scripts["prisma:push"] = "prisma db push"
+          scripts["prisma:studio"] = "prisma studio"
+          scripts["db:seed"] = "prisma db seed"
+          scripts["db:push-seed"] = "prisma db push && prisma db seed"
+
+          path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+          PY
+
+          cat > README.md <<'EOF'
+          # سرویسیار
+
+          **سرویسیار** یک وب اپلیکیشن فارسی، راست‌چین و ماژولار برای مدیریت خدمات پس از فروش و تعمیرات لوازم خانگی است.
+
+          هدف محصول این است که به تعمیرکاران، تیم‌های خدماتی و نمایندگی‌ها فروخته شود و با **کد فعال‌سازی + انتخاب ماژول‌ها** کار کند.
+
+          ---
+
+          ## امکانات MVP
+
+          - ورود و ثبت‌نام
+          - ساخت کسب‌وکار یا Tenant
+          - فعال‌سازی با کد لایسنس
+          - مدیریت مشتریان
+          - مدیریت آدرس مشتری
+          - مدیریت دستگاه مشتری
+          - ثبت درخواست تعمیر
+          - مدیریت وضعیت درخواست
+          - مدیریت تکنسین‌ها
+          - ثبت گزارش تعمیر
+          - صدور فاکتور
+          - چاپ فاکتور فارسی
+          - پنل مدیر کل
+          - ساخت و مدیریت لایسنس
+          - مدیریت ماژول‌های فعال هر کسب‌وکار
+
+          ---
+
+          ## تکنولوژی‌ها
+
+          - Next.js
+          - TypeScript
+          - PostgreSQL
+          - Prisma
+          - Docker
+          - GitHub Actions
+          - Vercel-ready
+
+          ---
+
+          ## مسیرهای اصلی
+
+          ```text
+          /auth/login
+          /auth/register
+          /dashboard
+          /dashboard/customers
+          /dashboard/service-requests
+          /dashboard/technicians
+          /dashboard/invoices
+          /super-admin
+          /api/health
+          ```
+
+          ---
+
+          ## راهنمای Deploy
+
+          راهنمای کامل Deploy بدون کامپیوتر در این فایل است:
+
+          ```text
+          docs/DEPLOYMENT.md
+          ```
+
+          ---
+
+          ## کاربر مدیر کل نمونه
+
+          اگر Seed اجرا شود:
+
+          ```text
+          موبایل: 09120000000
+          ایمیل: admin@servicyar.local
+          رمز: Admin@123456
+          ```
+
+          > در محیط واقعی حتماً رمز را تغییر دهید.
+
+          ---
+
+          ## کدهای تست لایسنس
+
+          ```text
+          SERVICYAR-BASIC-001-DEMO
+          SERVICYAR-PRO-001-DEMO
+          SERVICYAR-ENTERPRISE-001-DEMO
+          ```
+
+          ---
+
+          ## هشدار امنیتی
+
+          فایل `.env`، توکن‌ها، `DATABASE_URL` واقعی و رمزها نباید داخل GitHub Commit شوند.
+          EOF
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add deployment tools, CI, database workflow and docs"
+            git push
+          fi
+
+      - name: Create ZIP file
+        run: |
+          zip -r servicyar-deployment-tools.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-deployment-tools
+          path: servicyar-deployment-tools.zip
