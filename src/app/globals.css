@@ -565,3 +565,39 @@ select:focus {
     grid-template-columns: 1fr;
   }
 }
+
+/* Technicians and service reports */
+
+.active-pill,
+.inactive-pill {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 7px 10px;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.active-pill {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.inactive-pill {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.table-action.green {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.stats-grid.inner {
+  margin: 12px 0 0;
+}

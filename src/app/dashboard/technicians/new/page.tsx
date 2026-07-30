@@ -1,15 +1,15 @@
 import Link from "next/link";
-import { createCustomerAction } from "@/app/dashboard/customers/actions";
+import { createTechnicianAction } from "@/app/dashboard/technicians/actions";
 import { requireModule } from "@/lib/modules";
 import { requireTenantContext } from "@/lib/tenant-context";
 
-export default async function NewCustomerPage({
+export default async function NewTechnicianPage({
   searchParams
 }: {
   searchParams?: Promise<{ error?: string }>;
 }) {
   const context = await requireTenantContext();
-  await requireModule(context.tenantId, "customers");
+  await requireModule(context.tenantId, "technicians");
 
   const params = await searchParams;
 
@@ -33,14 +33,14 @@ export default async function NewCustomerPage({
       <section className="content">
         <header className="page-header">
           <div>
-            <span className="badge">مشتری جدید</span>
-            <h1>ثبت مشتری جدید</h1>
+            <span className="badge">تکنسین جدید</span>
+            <h1>ثبت تکنسین جدید</h1>
             <p className="muted">
-              اطلاعات اولیه مشتری را وارد کنید. بعد از ثبت، می‌توانید آدرس و دستگاه‌های او را اضافه کنید.
+              برای تکنسین حساب کاربری ساخته می‌شود تا بتواند وارد پنل شود و گزارش تعمیر ثبت کند.
             </p>
           </div>
 
-          <Link className="ghost-light-button" href="/dashboard/customers">
+          <Link className="ghost-light-button" href="/dashboard/technicians">
             بازگشت
           </Link>
         </header>
@@ -48,15 +48,10 @@ export default async function NewCustomerPage({
         {params?.error ? <div className="alert error">{params.error}</div> : null}
 
         <section className="panel">
-          <form action={createCustomerAction} className="form two-column">
+          <form action={createTechnicianAction} className="form two-column">
             <label>
-              نام
-              <input name="firstName" placeholder="مثلاً علی" required />
-            </label>
-
-            <label>
-              نام خانوادگی، اختیاری
-              <input name="lastName" placeholder="مثلاً احمدی" />
+              نام تکنسین
+              <input name="name" placeholder="مثلاً رضا محمدی" required />
             </label>
 
             <label>
@@ -65,17 +60,17 @@ export default async function NewCustomerPage({
             </label>
 
             <label>
-              تلفن ثابت، اختیاری
-              <input name="phone" placeholder="021..." />
+              ایمیل، اختیاری
+              <input name="email" type="email" placeholder="technician@example.com" />
             </label>
 
-            <label className="span-2">
-              توضیحات
-              <textarea name="notes" placeholder="توضیحات داخلی درباره مشتری"></textarea>
+            <label>
+              رمز عبور
+              <input name="password" type="password" placeholder="حداقل ۸ کاراکتر" required />
             </label>
 
             <button className="button full span-2" type="submit">
-              ثبت مشتری
+              ثبت تکنسین
             </button>
           </form>
         </section>
