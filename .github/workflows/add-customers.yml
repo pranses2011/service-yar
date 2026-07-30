@@ -1,0 +1,1053 @@
+name: Add Customers Module
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate customers module files
+        run: |
+          mkdir -p src/app/dashboard/customers
+          mkdir -p src/app/dashboard/customers/new
+          mkdir -p 'src/app/dashboard/customers/[customerId]'
+          mkdir -p src/lib
+
+          cat > src/lib/tenant-context.ts <<'EOF'
+          import { redirect } from "next/navigation";
+          import { getCurrentSession } from "@/lib/session";
+
+          export async function requireTenantContext() {
+            const session = await getCurrentSession();
+
+            if (!session) {
+              redirect("/auth/login");
+            }
+
+            if (!session.tenant || !session.membership) {
+              redirect("/super-admin");
+            }
+
+            return {
+              user: session.user,
+              tenant: session.tenant,
+              membership: session.membership,
+              tenantId: session.tenant.id,
+              role: session.membership.role
+            };
+          }
+          EOF
+
+          cat > src/app/dashboard/customers/actions.ts <<'EOF'
+          "use server";
+
+          import { redirect } from "next/navigation";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requirePermission } from "@/lib/permissions";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          function cleanText(value: FormDataEntryValue | null) {
+            return String(value || "").trim();
+          }
+
+          function errorRedirect(path: string, message: string): never {
+            redirect(`${path}?error=${encodeURIComponent(message)}`);
+          }
+
+          export async function createCustomerAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "customers");
+            requirePermission(context.role, "customers.create");
+
+            const firstName = cleanText(formData.get("firstName"));
+            const lastName = cleanText(formData.get("lastName"));
+            const mobile = cleanText(formData.get("mobile"));
+            const phone = cleanText(formData.get("phone"));
+            const notes = cleanText(formData.get("notes"));
+
+            if (!firstName || !mobile) {
+              errorRedirect("/dashboard/customers/new", "نام و شماره موبایل مشتری الزامی است.");
+            }
+
+            const existingCustomer = await prisma.customer.findUnique({
+              where: {
+                tenantId_mobile: {
+                  tenantId: context.tenantId,
+                  mobile
+                }
+              }
+            });
+
+            if (existingCustomer) {
+              errorRedirect("/dashboard/customers/new", "مشتری با این شماره موبایل قبلاً ثبت شده است.");
+            }
+
+            const customer = await prisma.customer.create({
+              data: {
+                tenantId: context.tenantId,
+                firstName,
+                lastName: lastName || null,
+                mobile,
+                phone: phone || null,
+                notes: notes || null
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "customer.created",
+                entityType: "Customer",
+                entityId: customer.id,
+                metadata: {
+                  mobile
+                }
+              }
+            });
+
+            redirect(`/dashboard/customers/${customer.id}`);
+          }
+
+          export async function updateCustomerAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "customers");
+            requirePermission(context.role, "customers.update");
+
+            const customerId = cleanText(formData.get("customerId"));
+            const firstName = cleanText(formData.get("firstName"));
+            const lastName = cleanText(formData.get("lastName"));
+            const mobile = cleanText(formData.get("mobile"));
+            const phone = cleanText(formData.get("phone"));
+            const notes = cleanText(formData.get("notes"));
+
+            if (!customerId) {
+              errorRedirect("/dashboard/customers", "شناسه مشتری معتبر نیست.");
+            }
+
+            if (!firstName || !mobile) {
+              errorRedirect(`/dashboard/customers/${customerId}`, "نام و شماره موبایل مشتری الزامی است.");
+            }
+
+            const customer = await prisma.customer.findFirst({
+              where: {
+                id: customerId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!customer) {
+              errorRedirect("/dashboard/customers", "مشتری پیدا نشد.");
+            }
+
+            const duplicateMobile = await prisma.customer.findFirst({
+              where: {
+                tenantId: context.tenantId,
+                mobile,
+                id: {
+                  not: customerId
+                }
+              }
+            });
+
+            if (duplicateMobile) {
+              errorRedirect(`/dashboard/customers/${customerId}`, "این شماره موبایل برای مشتری دیگری ثبت شده است.");
+            }
+
+            await prisma.customer.update({
+              where: {
+                id: customerId
+              },
+              data: {
+                firstName,
+                lastName: lastName || null,
+                mobile,
+                phone: phone || null,
+                notes: notes || null
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "customer.updated",
+                entityType: "Customer",
+                entityId: customerId
+              }
+            });
+
+            redirect(`/dashboard/customers/${customerId}?success=${encodeURIComponent("اطلاعات مشتری ذخیره شد.")}`);
+          }
+
+          export async function createCustomerAddressAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "customers");
+            requirePermission(context.role, "customers.update");
+
+            const customerId = cleanText(formData.get("customerId"));
+            const city = cleanText(formData.get("city"));
+            const address = cleanText(formData.get("address"));
+            const postalCode = cleanText(formData.get("postalCode"));
+            const plate = cleanText(formData.get("plate"));
+            const unit = cleanText(formData.get("unit"));
+            const description = cleanText(formData.get("description"));
+
+            if (!customerId || !city || !address) {
+              errorRedirect(`/dashboard/customers/${customerId}`, "شهر و آدرس کامل الزامی است.");
+            }
+
+            const customer = await prisma.customer.findFirst({
+              where: {
+                id: customerId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!customer) {
+              errorRedirect("/dashboard/customers", "مشتری پیدا نشد.");
+            }
+
+            const createdAddress = await prisma.customerAddress.create({
+              data: {
+                tenantId: context.tenantId,
+                customerId,
+                city,
+                address,
+                postalCode: postalCode || null,
+                plate: plate || null,
+                unit: unit || null,
+                description: description || null
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "customer_address.created",
+                entityType: "CustomerAddress",
+                entityId: createdAddress.id
+              }
+            });
+
+            redirect(`/dashboard/customers/${customerId}?success=${encodeURIComponent("آدرس مشتری ثبت شد.")}`);
+          }
+
+          export async function createApplianceAction(formData: FormData) {
+            const context = await requireTenantContext();
+
+            await requireModule(context.tenantId, "appliances");
+            requirePermission(context.role, "customers.update");
+
+            const customerId = cleanText(formData.get("customerId"));
+            const type = cleanText(formData.get("type"));
+            const brand = cleanText(formData.get("brand"));
+            const model = cleanText(formData.get("model"));
+            const serialNumber = cleanText(formData.get("serialNumber"));
+            const notes = cleanText(formData.get("notes"));
+
+            if (!customerId || !type) {
+              errorRedirect(`/dashboard/customers/${customerId}`, "نوع دستگاه الزامی است.");
+            }
+
+            const customer = await prisma.customer.findFirst({
+              where: {
+                id: customerId,
+                tenantId: context.tenantId
+              }
+            });
+
+            if (!customer) {
+              errorRedirect("/dashboard/customers", "مشتری پیدا نشد.");
+            }
+
+            const appliance = await prisma.appliance.create({
+              data: {
+                tenantId: context.tenantId,
+                customerId,
+                type,
+                brand: brand || null,
+                model: model || null,
+                serialNumber: serialNumber || null,
+                notes: notes || null
+              }
+            });
+
+            await prisma.auditLog.create({
+              data: {
+                tenantId: context.tenantId,
+                userId: context.user.id,
+                action: "appliance.created",
+                entityType: "Appliance",
+                entityId: appliance.id
+              }
+            });
+
+            redirect(`/dashboard/customers/${customerId}?success=${encodeURIComponent("دستگاه مشتری ثبت شد.")}`);
+          }
+          EOF
+
+          cat > src/app/dashboard/customers/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function CustomersPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ q?: string; error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "customers");
+
+            const params = await searchParams;
+            const q = String(params?.q || "").trim();
+
+            const customers = await prisma.customer.findMany({
+              where: {
+                tenantId: context.tenantId,
+                ...(q
+                  ? {
+                      OR: [
+                        {
+                          firstName: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          lastName: {
+                            contains: q,
+                            mode: "insensitive"
+                          }
+                        },
+                        {
+                          mobile: {
+                            contains: q
+                          }
+                        }
+                      ]
+                    }
+                  : {})
+              },
+              include: {
+                _count: {
+                  select: {
+                    addresses: true,
+                    appliances: true,
+                    serviceRequests: true
+                  }
+                }
+              },
+              orderBy: {
+                createdAt: "desc"
+              },
+              take: 100
+            });
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <a href="#">درخواست‌های تعمیر</a>
+                      <a href="#">تکنسین‌ها</a>
+                      <a href="#">فاکتورها</a>
+                      <Link href="/auth/activate">اشتراک و لایسنس</Link>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">مدیریت مشتریان</span>
+                      <h1>مشتریان</h1>
+                      <p className="muted">
+                        مشتریان نهایی، آدرس‌ها، دستگاه‌ها و سوابق تعمیر را از این بخش مدیریت کنید.
+                      </p>
+                    </div>
+
+                    <Link className="button" href="/dashboard/customers/new">
+                      + ثبت مشتری جدید
+                    </Link>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+                  {params?.success ? <div className="alert success">{params.success}</div> : null}
+
+                  <section className="panel">
+                    <form className="search-form">
+                      <input
+                        name="q"
+                        defaultValue={q}
+                        placeholder="جستجو با نام، نام خانوادگی یا شماره موبایل"
+                      />
+                      <button className="button compact" type="submit">
+                        جستجو
+                      </button>
+                      {q ? (
+                        <Link className="secondary-link" href="/dashboard/customers">
+                          حذف فیلتر
+                        </Link>
+                      ) : null}
+                    </form>
+                  </section>
+
+                  <section className="panel">
+                    {customers.length === 0 ? (
+                      <div className="empty-state">
+                        <h3>هنوز مشتری ثبت نشده است</h3>
+                        <p className="muted">
+                          برای شروع، اولین مشتری را ثبت کنید تا بعداً بتوانید برای او دستگاه و درخواست تعمیر بسازید.
+                        </p>
+                        <Link className="button" href="/dashboard/customers/new">
+                          ثبت اولین مشتری
+                        </Link>
+                      </div>
+                    ) : (
+                      <div className="table-wrapper">
+                        <table>
+                          <thead>
+                            <tr>
+                              <th>نام مشتری</th>
+                              <th>موبایل</th>
+                              <th>آدرس‌ها</th>
+                              <th>دستگاه‌ها</th>
+                              <th>درخواست‌ها</th>
+                              <th>تاریخ ثبت</th>
+                              <th>عملیات</th>
+                            </tr>
+                          </thead>
+
+                          <tbody>
+                            {customers.map((customer) => (
+                              <tr key={customer.id}>
+                                <td>
+                                  <strong>
+                                    {customer.firstName} {customer.lastName || ""}
+                                  </strong>
+                                </td>
+                                <td dir="ltr">{customer.mobile}</td>
+                                <td>{customer._count.addresses}</td>
+                                <td>{customer._count.appliances}</td>
+                                <td>{customer._count.serviceRequests}</td>
+                                <td>{customer.createdAt.toLocaleDateString("fa-IR")}</td>
+                                <td>
+                                  <Link className="table-action" href={`/dashboard/customers/${customer.id}`}>
+                                    مشاهده
+                                  </Link>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > src/app/dashboard/customers/new/page.tsx <<'EOF'
+          import Link from "next/link";
+          import { createCustomerAction } from "@/app/dashboard/customers/actions";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          export default async function NewCustomerPage({
+            searchParams
+          }: {
+            searchParams?: Promise<{ error?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "customers");
+
+            const params = await searchParams;
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <a href="#">درخواست‌های تعمیر</a>
+                      <a href="#">تکنسین‌ها</a>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">مشتری جدید</span>
+                      <h1>ثبت مشتری جدید</h1>
+                      <p className="muted">
+                        اطلاعات اولیه مشتری را وارد کنید. بعد از ثبت، می‌توانید آدرس و دستگاه‌های او را اضافه کنید.
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/dashboard/customers">
+                      بازگشت
+                    </Link>
+                  </header>
+
+                  {params?.error ? <div className="alert error">{params.error}</div> : null}
+
+                  <section className="panel">
+                    <form action={createCustomerAction} className="form two-column">
+                      <label>
+                        نام
+                        <input name="firstName" placeholder="مثلاً علی" required />
+                      </label>
+
+                      <label>
+                        نام خانوادگی، اختیاری
+                        <input name="lastName" placeholder="مثلاً احمدی" />
+                      </label>
+
+                      <label>
+                        شماره موبایل
+                        <input name="mobile" placeholder="09120000000" required />
+                      </label>
+
+                      <label>
+                        تلفن ثابت، اختیاری
+                        <input name="phone" placeholder="021..." />
+                      </label>
+
+                      <label className="span-2">
+                        توضیحات
+                        <textarea name="notes" placeholder="توضیحات داخلی درباره مشتری"></textarea>
+                      </label>
+
+                      <button className="button full span-2" type="submit">
+                        ثبت مشتری
+                      </button>
+                    </form>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat > 'src/app/dashboard/customers/[customerId]/page.tsx' <<'EOF'
+          import Link from "next/link";
+          import { notFound } from "next/navigation";
+          import {
+            createApplianceAction,
+            createCustomerAddressAction,
+            updateCustomerAction
+          } from "@/app/dashboard/customers/actions";
+          import { prisma } from "@/lib/prisma";
+          import { requireModule } from "@/lib/modules";
+          import { requireTenantContext } from "@/lib/tenant-context";
+
+          const applianceTypes = [
+            "یخچال",
+            "فریزر",
+            "ماشین لباسشویی",
+            "ماشین ظرفشویی",
+            "کولر گازی",
+            "اجاق گاز",
+            "مایکروفر",
+            "جاروبرقی",
+            "پکیج",
+            "سایر"
+          ];
+
+          export default async function CustomerDetailsPage({
+            params,
+            searchParams
+          }: {
+            params: Promise<{ customerId: string }>;
+            searchParams?: Promise<{ error?: string; success?: string }>;
+          }) {
+            const context = await requireTenantContext();
+            await requireModule(context.tenantId, "customers");
+
+            const { customerId } = await params;
+            const query = await searchParams;
+
+            const customer = await prisma.customer.findFirst({
+              where: {
+                id: customerId,
+                tenantId: context.tenantId
+              },
+              include: {
+                addresses: {
+                  orderBy: {
+                    createdAt: "desc"
+                  }
+                },
+                appliances: {
+                  orderBy: {
+                    createdAt: "desc"
+                  }
+                },
+                serviceRequests: {
+                  orderBy: {
+                    createdAt: "desc"
+                  },
+                  take: 10
+                }
+              }
+            });
+
+            if (!customer) {
+              notFound();
+            }
+
+            return (
+              <main className="app-shell">
+                <aside className="sidebar">
+                  <div>
+                    <h2>سرویسیار</h2>
+                    <p>{context.tenant.name}</p>
+
+                    <nav>
+                      <Link href="/dashboard">داشبورد</Link>
+                      <Link href="/dashboard/customers">مشتریان</Link>
+                      <a href="#">درخواست‌های تعمیر</a>
+                      <a href="#">تکنسین‌ها</a>
+                      <a href="#">فاکتورها</a>
+                    </nav>
+                  </div>
+                </aside>
+
+                <section className="content">
+                  <header className="page-header">
+                    <div>
+                      <span className="badge">پرونده مشتری</span>
+                      <h1>
+                        {customer.firstName} {customer.lastName || ""}
+                      </h1>
+                      <p className="muted">
+                        موبایل: <span dir="ltr">{customer.mobile}</span>
+                      </p>
+                    </div>
+
+                    <Link className="ghost-light-button" href="/dashboard/customers">
+                      بازگشت به مشتریان
+                    </Link>
+                  </header>
+
+                  {query?.error ? <div className="alert error">{query.error}</div> : null}
+                  {query?.success ? <div className="alert success">{query.success}</div> : null}
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>ویرایش اطلاعات مشتری</h3>
+
+                      <form action={updateCustomerAction} className="form">
+                        <input type="hidden" name="customerId" value={customer.id} />
+
+                        <label>
+                          نام
+                          <input name="firstName" defaultValue={customer.firstName} required />
+                        </label>
+
+                        <label>
+                          نام خانوادگی
+                          <input name="lastName" defaultValue={customer.lastName || ""} />
+                        </label>
+
+                        <label>
+                          شماره موبایل
+                          <input name="mobile" defaultValue={customer.mobile} required />
+                        </label>
+
+                        <label>
+                          تلفن ثابت
+                          <input name="phone" defaultValue={customer.phone || ""} />
+                        </label>
+
+                        <label>
+                          توضیحات
+                          <textarea name="notes" defaultValue={customer.notes || ""}></textarea>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ذخیره اطلاعات
+                        </button>
+                      </form>
+                    </div>
+
+                    <div className="panel">
+                      <h3>ثبت آدرس جدید</h3>
+
+                      <form action={createCustomerAddressAction} className="form">
+                        <input type="hidden" name="customerId" value={customer.id} />
+
+                        <label>
+                          شهر
+                          <input name="city" placeholder="مثلاً تبریز" required />
+                        </label>
+
+                        <label>
+                          آدرس کامل
+                          <textarea name="address" placeholder="خیابان، کوچه، پلاک..." required></textarea>
+                        </label>
+
+                        <div className="mini-grid">
+                          <label>
+                            پلاک
+                            <input name="plate" />
+                          </label>
+
+                          <label>
+                            واحد
+                            <input name="unit" />
+                          </label>
+                        </div>
+
+                        <label>
+                          کد پستی
+                          <input name="postalCode" />
+                        </label>
+
+                        <label>
+                          توضیحات مسیر
+                          <textarea name="description"></textarea>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ثبت آدرس
+                        </button>
+                      </form>
+                    </div>
+                  </section>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>آدرس‌های مشتری</h3>
+
+                      {customer.addresses.length === 0 ? (
+                        <p className="muted">هنوز آدرسی برای این مشتری ثبت نشده است.</p>
+                      ) : (
+                        <div className="stack-list">
+                          {customer.addresses.map((address) => (
+                            <article className="list-card" key={address.id}>
+                              <strong>{address.city}</strong>
+                              <p>{address.address}</p>
+                              <small>
+                                {address.plate ? `پلاک ${address.plate}` : ""}
+                                {address.unit ? ` - واحد ${address.unit}` : ""}
+                              </small>
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="panel">
+                      <h3>ثبت دستگاه جدید</h3>
+
+                      <form action={createApplianceAction} className="form">
+                        <input type="hidden" name="customerId" value={customer.id} />
+
+                        <label>
+                          نوع دستگاه
+                          <select name="type" required defaultValue="">
+                            <option value="" disabled>
+                              انتخاب کنید
+                            </option>
+                            {applianceTypes.map((type) => (
+                              <option key={type} value={type}>
+                                {type}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <label>
+                          برند
+                          <input name="brand" placeholder="مثلاً سامسونگ، ال‌جی، اسنوا" />
+                        </label>
+
+                        <label>
+                          مدل
+                          <input name="model" />
+                        </label>
+
+                        <label>
+                          شماره سریال
+                          <input name="serialNumber" />
+                        </label>
+
+                        <label>
+                          توضیحات
+                          <textarea name="notes"></textarea>
+                        </label>
+
+                        <button className="button full" type="submit">
+                          ثبت دستگاه
+                        </button>
+                      </form>
+                    </div>
+                  </section>
+
+                  <section className="dashboard-grid">
+                    <div className="panel">
+                      <h3>دستگاه‌های مشتری</h3>
+
+                      {customer.appliances.length === 0 ? (
+                        <p className="muted">هنوز دستگاهی برای این مشتری ثبت نشده است.</p>
+                      ) : (
+                        <div className="stack-list">
+                          {customer.appliances.map((appliance) => (
+                            <article className="list-card" key={appliance.id}>
+                              <strong>{appliance.type}</strong>
+                              <p>
+                                {appliance.brand || "برند نامشخص"}
+                                {appliance.model ? ` - مدل ${appliance.model}` : ""}
+                              </p>
+                              {appliance.serialNumber ? (
+                                <small>سریال: {appliance.serialNumber}</small>
+                              ) : null}
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="panel">
+                      <h3>سوابق درخواست تعمیر</h3>
+
+                      {customer.serviceRequests.length === 0 ? (
+                        <div>
+                          <p className="muted">
+                            هنوز درخواست تعمیری برای این مشتری ثبت نشده است.
+                          </p>
+                          <p className="muted">
+                            در مرحله بعد، ماژول ثبت درخواست تعمیر را اضافه می‌کنیم.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="stack-list">
+                          {customer.serviceRequests.map((request) => (
+                            <article className="list-card" key={request.id}>
+                              <strong>{request.trackingCode}</strong>
+                              <p>{request.problemDescription}</p>
+                              <small>{request.status}</small>
+                            </article>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                </section>
+              </main>
+            );
+          }
+          EOF
+
+          cat >> src/app/globals.css <<'EOF'
+
+          /* Customers module */
+
+          .page-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 16px;
+            align-items: flex-start;
+            margin-bottom: 24px;
+          }
+
+          .ghost-light-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #d1d5db;
+            background: #ffffff;
+            color: #111827;
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-weight: 800;
+          }
+
+          .button.compact {
+            margin-top: 0;
+            border: none;
+            cursor: pointer;
+            white-space: nowrap;
+          }
+
+          .secondary-link {
+            color: #0369a1;
+            font-weight: 800;
+            padding: 10px;
+          }
+
+          .search-form {
+            display: grid;
+            grid-template-columns: 1fr auto auto;
+            gap: 12px;
+            align-items: center;
+          }
+
+          .table-wrapper {
+            width: 100%;
+            overflow-x: auto;
+          }
+
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 760px;
+          }
+
+          th,
+          td {
+            text-align: right;
+            border-bottom: 1px solid #e5e7eb;
+            padding: 14px 10px;
+            vertical-align: middle;
+          }
+
+          th {
+            color: #475569;
+            font-size: 14px;
+            background: #f8fafc;
+          }
+
+          tr:last-child td {
+            border-bottom: none;
+          }
+
+          .table-action {
+            display: inline-flex;
+            border-radius: 10px;
+            background: #e0f2fe;
+            color: #0369a1;
+            padding: 8px 10px;
+            font-weight: 800;
+          }
+
+          .empty-state {
+            text-align: center;
+            padding: 32px 16px;
+          }
+
+          textarea,
+          select {
+            width: 100%;
+            border: 1px solid #d1d5db;
+            border-radius: 14px;
+            padding: 12px 14px;
+            font: inherit;
+            background: #ffffff;
+            color: #111827;
+            outline: none;
+          }
+
+          textarea {
+            min-height: 96px;
+            resize: vertical;
+          }
+
+          textarea:focus,
+          select:focus {
+            border-color: #0ea5e9;
+            box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.12);
+          }
+
+          .mini-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+          }
+
+          .stack-list {
+            display: grid;
+            gap: 12px;
+          }
+
+          .list-card {
+            border: 1px solid #e5e7eb;
+            background: #f8fafc;
+            border-radius: 16px;
+            padding: 14px;
+          }
+
+          .list-card p {
+            margin: 8px 0;
+            color: #475569;
+            line-height: 1.8;
+          }
+
+          .list-card small {
+            color: #64748b;
+          }
+
+          .alert.success {
+            background: #ecfdf5;
+            color: #065f46;
+            border: 1px solid #a7f3d0;
+          }
+
+          @media (max-width: 820px) {
+            .page-header {
+              flex-direction: column;
+            }
+
+            .search-form {
+              grid-template-columns: 1fr;
+            }
+
+            .mini-grid {
+              grid-template-columns: 1fr;
+            }
+          }
+          EOF
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Add customers, addresses and appliances module"
+            git push
+          fi
+
+      - name: Create ZIP file
+        run: |
+          zip -r servicyar-customers.zip . -x ".git/*"
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: servicyar-customers
+          path: servicyar-customers.zip
