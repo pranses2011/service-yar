@@ -55,7 +55,7 @@ export default async function DashboardPage() {
           <Link href="/dashboard/service-requests">درخواست‌های تعمیر</Link>
           <Link href="/dashboard/technicians">تکنسین‌ها</Link>
           <Link href="/dashboard/invoices">فاکتورها</Link>
-          <Link href="/auth/activate">اشتراک و لایسنس</Link>
+          <Link href="/dashboard/subscription">اشتراک و ماژول‌ها</Link>
         </nav>
 
         <form action={logoutAction}>

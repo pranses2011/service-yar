@@ -38,8 +38,19 @@ export default async function SuperAdminPage() {
         <span className="badge">Super Admin</span>
         <h1>پنل مدیر کل سرویسیار</h1>
         <p className="muted">
-          از این بخش می‌توانید کسب‌وکارهای خریدار، لایسنس‌ها، پلن‌ها و ماژول‌های قابل فروش را مدیریت کنید.
+          این پنل برای مالک نرم‌افزار است. برای تست مشتریان، تعمیرات و تکنسین‌ها باید یک کسب‌وکار جداگانه از مسیر ثبت‌نام بسازید.
         </p>
+
+        <div className="alert warning">
+          اگر می‌خواهید بخش‌های عملیاتی مثل مشتریان، درخواست تعمیر و فاکتور را تست کنید، ابتدا از حساب مدیر کل خارج شوید و از مسیر ثبت‌نام، یک کسب‌وکار تستی با کد لایسنس حرفه‌ای بسازید.
+        </div>
+
+        <div className="hint-box">
+          <strong>کدهای پیشنهادی برای تست کسب‌وکار:</strong>
+          <code>SERVICYAR-PRO-001-DEMO</code>
+          <code>SERVICYAR-PRO-002-DEMO</code>
+          <code>SERVICYAR-ENTERPRISE-001-DEMO</code>
+        </div>
 
         <div className="admin-nav">
           <Link href="/super-admin/tenants">کسب‌وکارها</Link>
@@ -47,6 +58,7 @@ export default async function SuperAdminPage() {
           <Link href="/super-admin/licenses/new">ساخت لایسنس</Link>
           <Link href="/super-admin/plans">پلن‌ها</Link>
           <Link href="/super-admin/modules">ماژول‌ها</Link>
+          <Link href="/auth/register">ثبت کسب‌وکار تستی</Link>
         </div>
 
         <form action={logoutAction}>
